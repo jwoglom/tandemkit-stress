@@ -1,7 +1,7 @@
 """`tandemkit-stress run`: Trio on the iOS Simulator against faketandem, with chaos, until a deadline.
 
     ./tandemkit-stress run                          # closed-beta Trio + TandemKit dev, 60 min budget
-    ./tandemkit-stress run --minutes 240            # what the nightly job runs
+    ./tandemkit-stress run --minutes 360            # what the nightly job runs
     ./tandemkit-stress run --minutes 20 --seed 42 --intensity high
     ./tandemkit-stress run --tandemkit jwoglom/TandemKit#470   # a TandemKit PR instead of dev
     ./tandemkit-stress run --app build/…/Trio.app   # skip checkout and build (an app built with the virtual pump)
@@ -498,7 +498,7 @@ def add_run_arguments(p) -> None:
     p.add_argument("--faketandem-ref", default=None, help="faketandem branch/tag/sha (default FAKETANDEM_REF, main)")
     p.add_argument("--app", help="a Trio.app already built with TANDEMKIT_VIRTUAL_PUMP: skip checkout and build")
     p.add_argument("--minutes", type=float, default=60,
-                   help="whole-run budget from now, build included (default 60; the nightly job runs 240)")
+                   help="whole-run budget from now, build included (default 60; the nightly job runs 360)")
     p.add_argument("--deadline", help="end of the run as epoch seconds (overrides --minutes); CI passes its job limit")
     p.add_argument("--no-enforce-deadline", dest="enforce_deadline", action="store_false",
                    help="let the build run past the deadline instead of stopping it")

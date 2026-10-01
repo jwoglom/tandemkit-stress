@@ -9,7 +9,7 @@ noise, each round ending in a check that the driver came back. Only simulated de
 
 ```
 ./tandemkit-stress run                                     # closed-beta Trio + TandemKit dev, 60 min budget
-./tandemkit-stress run --minutes 240                       # the nightly job's length
+./tandemkit-stress run --minutes 360                       # the nightly job's length
 ./tandemkit-stress run --minutes 25 --seed 42 --intensity high
 ./tandemkit-stress run --tandemkit jwoglom/TandemKit#470   # a TandemKit PR
 ./tandemkit-stress run --app <Trio.app> --minutes 15       # reuse a virtual-pump build, skip checkout + build
@@ -85,16 +85,24 @@ did not come up), the run continues with pump, link and app chaos.
 
 ## CI
 
-`.github/workflows/stress-sim.yml` runs nightly (04:13 UTC) and on demand, on the self-hosted macOS workers.
+Two workflows run the lane on the self-hosted macOS workers. The job itself is `stress-sim-job.yml`, a reusable
+workflow with no trigger of its own; both of them call it.
 
-- **Time budget.** The job has a 240-minute limit, and the run gets a deadline 225 minutes after the job starts
-  (`minutes` on a manual run, at most 225). The build is stopped at whatever leaves time for setup and one round.
-  The rest, about three and a half hours after a warm build, goes to rounds (about 45 at 4 minutes each), then
-  issues and artifacts.
+| Workflow | Trigger | Run budget | Job limit |
+|---|---|---|---|
+| `stress-sim-nightly.yml` | 02:00 America/New_York every night (the schedule's `timezone`, so it follows daylight saving) | 360 minutes | 375 minutes |
+| `stress-sim-manual.yml` | `workflow_dispatch`, with inputs for the TandemKit ref, seed, intensity, sanitizer and chaos categories | 60 minutes (`minutes`, at most 60) | 75 minutes |
+
+- **Time budget.** The run's deadline counts from the start of the job, build included, and the last 15 minutes of
+  the job are kept for issues and artifacts. The build is stopped at whatever leaves time for setup and one round.
+  After a warm build, the nightly run gets about 75 rounds at 4 minutes each, and the manual run about 10.
+- **One at a time.** Both workflows share the `stress-sim` concurrency group: a manual run started during the
+  nightly waits for it, and the other way round. GitHub keeps only one waiting run per group, so a second manual
+  run started while one waits replaces it.
 - **Persistent cache.** `TRIO_REPO`, `TH_DERIVED_DATA` and `TH_BUILD_DIR` live in a cache that survives between
   jobs: `/Volumes/work/cache/tandemkit-stress` if writable, else `~/Library/Caches/tandemkit-stress`. A warm build is
-  incremental (usually only TandemKit changed). A cold one with TSan takes a good share of the first night, and is
-  reported as `build-incomplete` or `built-only` if it uses up the whole budget.
+  incremental (usually only TandemKit changed). A cold one with TSan can use up a manual run's hour, and is
+  reported as `build-incomplete` or `built-only` when it does; the next run starts warm.
 - **Checkouts and tokens.** This repository is checked out with the job's own token. trio-test-harness is checked
   out at the commit the submodule pins (or `harness_ref`), and Trio's TandemKit submodule is fetched, with a GitHub
   App token (`TRIO_E2E_APP_ID` / `TRIO_E2E_APP_KEY`, contents read on trio-test-harness and TandemKit). That token

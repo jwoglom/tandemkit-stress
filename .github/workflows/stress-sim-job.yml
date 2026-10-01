@@ -1,77 +1,70 @@
-# The TandemKit stress lane, four hours a night: Trio (nightscout/Trio feat/tandem-closed-beta) with its TandemKit
-# submodule moved to TandemKit dev, built with the virtual pump and ThreadSanitizer, on the iOS Simulator against
-# faketandem, while `tandemkit-stress run` injects pump-side events, link faults and app kills (docs/lane.md).
-# Findings become issues in this repository: one per fingerprint, a repeat comments on the open issue.
-#   gh workflow run stress-sim.yml -R jwoglom/tandemkit-stress -f tandemkit=jwoglom/TandemKit#470 -f seed=42
-name: Stress (simulator + faketandem)
-run-name: "stress: TandemKit ${{ inputs.tandemkit || 'dev' }}${{ inputs.seed && format(' seed {0}', inputs.seed) || '' }}"
+# The simulator stress job: Trio (nightscout/Trio feat/tandem-closed-beta) with its TandemKit submodule moved to
+# TandemKit dev, built with the virtual pump and ThreadSanitizer, on the iOS Simulator against faketandem, while
+# `tandemkit-stress run` injects pump-side events, link faults and app kills (docs/lane.md). Findings become issues in
+# this repository: one per fingerprint, a repeat comments on the open issue.
+# It has no trigger of its own: stress-sim-nightly.yml (6 hours from 02:00 New York time) and stress-sim-manual.yml
+# (1 hour, on demand) call it.
+name: Stress job
 
 on:
-  schedule:
-    - cron: "13 4 * * *"
-  workflow_dispatch:
+  workflow_call:
     inputs:
+      minutes:
+        description: "Run budget in minutes, build included (at most timeout_minutes - 15)"
+        type: number
+        required: true
+      timeout_minutes:
+        description: "The job's limit; the last 15 minutes are kept for issues and artifacts"
+        type: number
+        required: true
       trio:
-        description: "Trio branch spec"
         type: string
         default: "nightscout/Trio:feat/tandem-closed-beta"
       tandemkit:
-        description: "TandemKit ref for the submodule: branch, sha, owner/repo@branch or a PR"
         type: string
         default: dev
-      minutes:
-        description: "Run budget in minutes, build included (at most 225: the job's limit is 240)"
-        type: string
-        default: "225"
       faketandem_ref:
-        description: "faketandem branch/tag/sha (blank: main)"
         type: string
+        default: ""
       harness_ref:
-        description: "trio-test-harness ref (blank: the commit the submodule pins)"
         type: string
+        default: ""
       seed:
-        description: "Chaos seed (blank: random)"
         type: string
+        default: ""
       intensity:
-        description: "Chaos intensity"
-        type: choice
-        options: [cycle, medium, high, low]
+        type: string
         default: cycle
       sanitizer:
-        description: "Sanitizer"
-        type: choice
-        options: [thread, address, none]
+        type: string
         default: thread
       categories:
-        description: "Chaos categories (comma-separated subset of pump,link,app,ui; blank: all)"
         type: string
+        default: ""
       file_issues:
-        description: "File issues for findings"
         type: boolean
         default: true
       xcode:
-        description: "Xcode"
-        type: choice
-        options: ["26.2"]
+        type: string
         default: "26.2"
+    secrets:
+      TRIO_E2E_APP_ID:
+        required: true
+      TRIO_E2E_APP_KEY:
+        required: true
 
 permissions:
   contents: read
   issues: write
 
-concurrency:
-  group: stress-sim
-  cancel-in-progress: false
-
 jobs:
   stress:
     runs-on: [self-hosted, macOS, worker]
-    timeout-minutes: 240
+    timeout-minutes: ${{ inputs.timeout_minutes }}
     env:
-      # Inputs reach scripts only through env, never interpolated into them. A scheduled run has no inputs.
+      # Inputs reach scripts only through env, never interpolated into them.
       IN_TRIO: ${{ inputs.trio || 'nightscout/Trio:feat/tandem-closed-beta' }}
       IN_TANDEMKIT: ${{ inputs.tandemkit || 'dev' }}
-      IN_MINUTES: ${{ inputs.minutes || '225' }}
       IN_FAKETANDEM_REF: ${{ inputs.faketandem_ref }}
       IN_SEED: ${{ inputs.seed }}
       IN_INTENSITY: ${{ inputs.intensity || 'cycle' }}
@@ -86,9 +79,14 @@ jobs:
     steps:
       # The run's deadline counts from here, leaving the end of the job for issues and artifacts.
       - name: Start the clock
+        env:
+          IN_MINUTES: ${{ inputs.minutes }}
+          JOB_MINUTES: ${{ inputs.timeout_minutes }}
         run: |
-          minutes=225
-          if [[ "$IN_MINUTES" =~ ^[0-9]+$ ]] && (( 10#$IN_MINUTES < 225 )); then minutes=$(( 10#$IN_MINUTES )); fi
+          cap=$(( JOB_MINUTES - 15 ))
+          minutes=$cap
+          if [[ "$IN_MINUTES" =~ ^[0-9]+$ ]] && (( 10#$IN_MINUTES > 0 && 10#$IN_MINUTES < cap )); then minutes=$(( 10#$IN_MINUTES )); fi
+          echo "run budget: $minutes minutes"
           echo "STRESS_DEADLINE=$(( $(date +%s) + minutes * 60 ))" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v4
@@ -118,8 +116,9 @@ jobs:
           path: trio-test-harness
           token: ${{ steps.token.outputs.token }}
 
-      # A cold Trio build with ThreadSanitizer is long; keeping the checkout and DerivedData between nights makes the
-      # build incremental (usually only TandemKit changed) and leaves the rest of the four hours to the rounds.
+      # A cold Trio build with ThreadSanitizer is long; keeping the checkout and DerivedData between runs makes the
+      # build incremental (usually only TandemKit changed). Both callers share the stress-sim concurrency group, so
+      # only one job uses this cache at a time.
       - name: Persistent build cache
         run: |
           set -euo pipefail
@@ -180,7 +179,7 @@ jobs:
       # 1: findings, 3: Trio does not build against this TandemKit. A confirmed driver bug is promoted to TandemKit by
       # a person; nothing is filed there from here.
       - name: File issues
-        if: always() && steps.stress.outputs.run_dir != '' && (steps.stress.outputs.rc == '1' || steps.stress.outputs.rc == '3') && (github.event_name == 'schedule' || inputs.file_issues)
+        if: always() && inputs.file_issues && steps.stress.outputs.run_dir != '' && (steps.stress.outputs.rc == '1' || steps.stress.outputs.rc == '3')
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_DIR: ${{ steps.stress.outputs.run_dir }}

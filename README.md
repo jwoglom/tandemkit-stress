@@ -5,7 +5,8 @@ and t:slim X2. It looks for crashes, data races, hangs and failures to recover. 
 under load, with its Bluetooth link broken on purpose. Every finding becomes an issue in this repository.
 
 The one lane built so far is Trio on the iOS Simulator against [faketandem](https://github.com/jwoglom/faketandem),
-the Tandem pump emulator. It runs for four hours a night on a self-hosted Mac.
+the Tandem pump emulator. It runs for six hours every night from 2am Eastern on a self-hosted Mac, and for an
+hour whenever it is started by hand.
 - **Build:** nightscout/Trio `feat/tandem-closed-beta`, with its TandemKit submodule moved to TandemKit `dev`, built
   with the virtual pump and ThreadSanitizer.
 - **Chaos:** seeded pump-side events, link faults, app kills and UI noise. Every round ends with a check that the
@@ -50,7 +51,9 @@ or `FAKETANDEM_BIN` + `FAKETANDEM_JAR` to skip building faketandem. The harness'
 
 | Workflow | Runs on | What |
 |---|---|---|
-| `stress-sim.yml` | `[self-hosted, macOS, worker]`, 04:13 UTC nightly and on demand | The lane: a 240-minute job with a run deadline at 225 minutes. Files issues for findings and build breaks. |
+| `stress-sim-nightly.yml` | 02:00 America/New_York every night | The lane for 6 hours (360-minute run, 375-minute job). |
+| `stress-sim-manual.yml` | by hand (`workflow_dispatch`) | The lane for 1 hour (60-minute run, 75-minute job), with inputs for the TandemKit ref, seed, intensity and chaos mix. |
+| `stress-sim-job.yml` | called by the two above | The job itself, on `[self-hosted, macOS, worker]`. Files issues for findings and build breaks. |
 | `tests.yml` | `ubuntu-latest`, every push and PR | Unit tests, including one against a live faketandem. |
 
 One-time setup:
@@ -69,7 +72,7 @@ One-time setup:
 4. **The submodule pin.** It points at the trio-test-harness commit that adds the build options this lane uses
    (`conditions`, `sanitizer`, `save`, `timeout`). Once that branch is merged, move the pin to the merged commit.
 
-The first build is cold and long with TSan, so it may use the whole first night: it is reported as
+The first build is cold and long with TSan, so a manual run may spend its whole hour on it: it is reported as
 `build-incomplete` or `built-only`, not a failure. The checkout and DerivedData persist in
 `/Volumes/work/cache/tandemkit-stress` (or `~/Library/Caches/tandemkit-stress`), so later nights rebuild little
 more than TandemKit.

@@ -10,12 +10,12 @@ Run commands from the tandemkit-stress checkout (`./setup.sh` once). Full descri
 ## Run
 | Want | Command |
 |---|---|
-| The nightly configuration (closed-beta Trio + TandemKit dev, TSan, intensity cycling) | `./tandemkit-stress run --minutes 240` (default budget 60 min, build included) |
+| The nightly configuration (closed-beta Trio + TandemKit dev, TSan, intensity cycling) | `./tandemkit-stress run --minutes 360` (default budget 60 min, build included) |
 | Shorter / reproducible / harsher | `./tandemkit-stress run --minutes 25 --seed 42 --intensity high` |
 | A TandemKit branch or PR | `--tandemkit my-branch` · `--tandemkit jwoglom/TandemKit#470` |
 | Skip checkout + build (an app already built with the virtual pump) | `--app <path to Trio.app>` |
 | Only some chaos | `--categories pump,link` (also `app`, `ui`); `--no-ui` skips WebDriverAgent |
-| In CI | `gh workflow run stress-sim.yml -R jwoglom/tandemkit-stress -f tandemkit=… -f seed=…` |
+| In CI, one hour | `gh workflow run stress-sim-manual.yml -R jwoglom/tandemkit-stress -f tandemkit=… -f seed=…` |
 
 The run holds the simulator's device lock in its harness checkout; `--wait` queues behind another holder. It uses its
 own simulator (`TandemKitStress`). It needs Go and Java 17 for faketandem and pumpX2's cliparser, or `FAKETANDEM_BIN`

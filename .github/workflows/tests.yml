@@ -1,6 +1,6 @@
 # The lane's parts that run without Xcode (detectors, seeding, chaos scheduling, issue bodies), plus the faketandem
 # client against the emulator's current default branch, on a hosted runner. The stress run itself needs the
-# self-hosted Macs (stress-sim.yml).
+# self-hosted Macs (stress-sim-job.yml).
 name: Tests
 
 on:
