@@ -1,0 +1,24 @@
+{"app_name":"Trio","timestamp":"2026-10-01 05:00:00.00 -0400","app_version":"0.9.0","bundleID":"org.nightscout.TRIOSIMTST.trio","bug_type":"309","os_version":"macOS 26.0","name":"Trio","incident_id":"00000000-0000-0000-0000-000000000000"}
+{
+  "procName" : "Trio",
+  "pid" : 4242,
+  "exception" : {"type" : "EXC_BREAKPOINT", "signal" : "SIGTRAP", "codes" : "0x0000000000000001, 0x0000000000000000"},
+  "termination" : {"namespace" : "SIGNAL", "indicator" : "Trace/BPT trap: 5", "code" : 5},
+  "asi" : {"libswiftCore.dylib" : ["Fatal error: Index out of range"]},
+  "faultingThread" : 1,
+  "threads" : [
+    {"id" : 1, "queue" : "com.apple.main-thread", "frames" : [{"imageOffset" : 10, "symbol" : "mach_msg2_trap", "imageIndex" : 3}]},
+    {"triggered" : true, "id" : 2, "queue" : "com.jwoglom.TandemKit.bluetoothManagerQueue", "frames" : [
+      {"imageOffset" : 123, "symbol" : "_assertionFailure(_:_:file:line:flags:)", "imageIndex" : 2},
+      {"imageOffset" : 456, "sourceLine" : 46, "sourceFile" : "HistoryLogStream.swift", "symbol" : "HistoryLogStreamResponse.init(cargo:)", "imageIndex" : 0},
+      {"imageOffset" : 789, "sourceLine" : 61, "sourceFile" : "BTResponseParser.swift", "symbol" : "static BTResponseParser.parse(data:characteristic:authKey:response:)", "imageIndex" : 0},
+      {"imageOffset" : 999, "sourceLine" : 556, "sourceFile" : "TandemPeripheralManager.swift", "symbol" : "TandemPeripheralManager.handleHistoryLogStreamPacket(_:)", "imageIndex" : 0}
+    ]}
+  ],
+  "usedImages" : [
+    {"name" : "TandemKit", "path" : "/Users/runner/Library/Developer/CoreSimulator/Devices/X/data/Containers/Bundle/Application/Y/Trio.app/Frameworks/TandemKit.framework/TandemKit"},
+    {"name" : "Trio.debug.dylib"},
+    {"name" : "libswiftCore.dylib"},
+    {"name" : "libsystem_kernel.dylib"}
+  ]
+}

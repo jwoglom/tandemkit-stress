@@ -1,0 +1,130 @@
+WARNING: ThreadSanitizer: data race (pid=2717)
+  Write of size 8 at 0x558f8a573930 by thread T30:
+    #0 $s9TandemKit16JpakeAuthBuilderC13clearInstanceyyFZ /work/TandemKit/Sources/TandemCore/Builders/JpakeAuthBuilder.swift:67:18 (TandemKitPackageTests.xctest+0xa0bce9) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #1 $s9TandemKit0A17PeripheralManagerC19performInitialSetupyyFyyYbcfU_ /work/TandemKit/Sources/TandemKit/PumpManager/TandemPeripheralManager.swift:651:34 (TandemKitPackageTests.xctest+0xbb6a8e) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #2 $s9TandemKit0A17PeripheralManagerC19performInitialSetupyyFyyYbcfU_TA /<compiler-generated> (TandemKitPackageTests.xctest+0xbba52d) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #3 $sIegh_IeyBh_TR /<compiler-generated> (TandemKitPackageTests.xctest+0x5cef32) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #4 __tsan::invoke_and_release_block(void*) /llvm/compiler-rt/lib/tsan/rtl/tsan_interceptors_libdispatch.cpp:155:3 (TandemKitPackageTests.xctest+0x1fe706) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #5 _dispatch_worker_thread.cold.5 queue.c (libdispatch.so+0x2239d) (BuildId: 39f6a5e2405b8354ac37bc77ab53148b35cda0c7)
+
+  Previous write of size 8 at 0x558f8a573930 by thread T26:
+    #0 $s9TandemKit16JpakeAuthBuilderC13clearInstanceyyFZ /work/TandemKit/Sources/TandemCore/Builders/JpakeAuthBuilder.swift:67:18 (TandemKitPackageTests.xctest+0xa0bce9) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #1 $s9TandemKit0A17PeripheralManagerC19performInitialSetupyyFyyYbcfU_6$deferL_yyF /work/TandemKit/Sources/TandemKit/PumpManager/TandemPeripheralManager.swift:605:34 (TandemKitPackageTests.xctest+0xbb9890) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #2 $s9TandemKit0A17PeripheralManagerC19performInitialSetupyyFyyYbcfU_ /work/TandemKit/Sources/TandemKit/PumpManager/TandemPeripheralManager.swift (TandemKitPackageTests.xctest+0xbb982a) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #3 $s9TandemKit0A17PeripheralManagerC19performInitialSetupyyFyyYbcfU_TA /<compiler-generated> (TandemKitPackageTests.xctest+0xbba52d) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #4 $sIegh_IeyBh_TR /<compiler-generated> (TandemKitPackageTests.xctest+0x5cef32) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #5 __tsan::invoke_and_release_block(void*) /llvm/compiler-rt/lib/tsan/rtl/tsan_interceptors_libdispatch.cpp:155:3 (TandemKitPackageTests.xctest+0x1fe706) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #6 _dispatch_worker_thread.cold.5 queue.c (libdispatch.so+0x2239d) (BuildId: 39f6a5e2405b8354ac37bc77ab53148b35cda0c7)
+
+  As if synchronized via sleep:
+    #0 nanosleep /llvm/compiler-rt/lib/tsan/rtl/tsan_interceptors_posix.cpp:398:3 (TandemKitPackageTests.xctest+0x1825a0) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #1 $s10Foundation6ThreadC5sleep15forTimeIntervalySd_tFZ <null> (libFoundation.so+0x362933) (BuildId: 16d3a09814244900f51ba347551c2b1bcb880563)
+    #2 $s9TandemKit0A17PeripheralManagerC19performInitialSetupyyFyyYbcfU_TA /<compiler-generated> (TandemKitPackageTests.xctest+0xbba52d) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #3 $sIegh_IeyBh_TR /<compiler-generated> (TandemKitPackageTests.xctest+0x5cef32) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #4 __tsan::invoke_and_release_block(void*) /llvm/compiler-rt/lib/tsan/rtl/tsan_interceptors_libdispatch.cpp:155:3 (TandemKitPackageTests.xctest+0x1fe706) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #5 _dispatch_worker_thread.cold.5 queue.c (libdispatch.so+0x2239d) (BuildId: 39f6a5e2405b8354ac37bc77ab53148b35cda0c7)
+
+  Location is global '$s9TandemKit16JpakeAuthBuilderC8instance33_0CA50D9A016C00BDA0D066A868C65F6BLLACSgvpZ' of size 8 at 0x558f8a573930 (TandemKitPackageTests.xctest+0x35cb930)
+
+  Thread T30 (tid=2785, running) created by thread T28 at:
+    #0 pthread_create /llvm/compiler-rt/lib/tsan/rtl/tsan_interceptors_posix.cpp:1023:3 (TandemKitPackageTests.xctest+0x1852c1) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #1 _dispatch_root_queue_poke_slow queue.c (libdispatch.so+0x31b75) (BuildId: 39f6a5e2405b8354ac37bc77ab53148b35cda0c7)
+    #2 $s8Dispatch0A5QueueC5async5group3qos5flags7executeyAA0A5GroupCSg_AA0A3QoSVAA0A13WorkItemFlagsVyyYbXBtF <null> (libswiftDispatch.so+0x1c56c) (BuildId: c4222a4f8ab8108c4c6a0440e9975d6547645a64)
+    #3 $s9TandemKit0A17PeripheralManagerC10peripheral_29didDiscoverCharacteristicsFor5erroryAA12CBPeripheralC_AA9CBServiceCs5Error_pSgtF /work/TandemKit/Sources/TandemKit/PumpManager/TandemPeripheralManager.swift:417:9 (TandemKitPackageTests.xctest+0xbc869a) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #4 $s9TandemKit0A17PeripheralManagerCAA20CBPeripheralDelegateA2aDP10peripheral_29didDiscoverCharacteristicsFor5erroryAA0E0C_AA9CBServiceCs5Error_pSgtFTW /<compiler-generated> (TandemKitPackageTests.xctest+0xbb4eed) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #5 $s9TandemKit12CBPeripheralC23discoverCharacteristics_3forySay13CoreBluetooth0H4UUIDVGSg_AA9CBServiceCtFyyYbcfU_ /work/TandemKit/Sources/TandemKit/PumpManager/VirtualPump/VirtualCoreBluetooth.swift:632:28 (TandemKitPackageTests.xctest+0xcb33b3) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #6 $s9TandemKit12CBPeripheralC23discoverCharacteristics_3forySay13CoreBluetooth0H4UUIDVGSg_AA9CBServiceCtFyyYbcfU_TA /<compiler-generated> (TandemKitPackageTests.xctest+0xcb8bc1) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #7 $sIegh_IeyBh_TR /<compiler-generated> (TandemKitPackageTests.xctest+0x5cef32) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #8 __tsan::invoke_and_release_block(void*) /llvm/compiler-rt/lib/tsan/rtl/tsan_interceptors_libdispatch.cpp:155:3 (TandemKitPackageTests.xctest+0x1fe706) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #9 _dispatch_lane_serial_drain crtstuff.c (libdispatch.so+0x2eb21) (BuildId: 39f6a5e2405b8354ac37bc77ab53148b35cda0c7)
+
+  Thread T26 (tid=2778, finished) created by thread T16 at:
+    #0 pthread_create /llvm/compiler-rt/lib/tsan/rtl/tsan_interceptors_posix.cpp:1023:3 (TandemKitPackageTests.xctest+0x1852c1) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #1 _dispatch_root_queue_poke_slow queue.c (libdispatch.so+0x31b75) (BuildId: 39f6a5e2405b8354ac37bc77ab53148b35cda0c7)
+    #2 $s8Dispatch0A5QueueC5async5group3qos5flags7executeyAA0A5GroupCSg_AA0A3QoSVAA0A13WorkItemFlagsVyyYbXBtF <null> (libswiftDispatch.so+0x1c56c) (BuildId: c4222a4f8ab8108c4c6a0440e9975d6547645a64)
+    #3 $s9TandemKit0A17PeripheralManagerC10peripheral_29didDiscoverCharacteristicsFor5erroryAA12CBPeripheralC_AA9CBServiceCs5Error_pSgtF /work/TandemKit/Sources/TandemKit/PumpManager/TandemPeripheralManager.swift:417:9 (TandemKitPackageTests.xctest+0xbc869a) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #4 $s9TandemKit0A17PeripheralManagerCAA20CBPeripheralDelegateA2aDP10peripheral_29didDiscoverCharacteristicsFor5erroryAA0E0C_AA9CBServiceCs5Error_pSgtFTW /<compiler-generated> (TandemKitPackageTests.xctest+0xbb4eed) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #5 $s9TandemKit12CBPeripheralC23discoverCharacteristics_3forySay13CoreBluetooth0H4UUIDVGSg_AA9CBServiceCtFyyYbcfU_ /work/TandemKit/Sources/TandemKit/PumpManager/VirtualPump/VirtualCoreBluetooth.swift:632:28 (TandemKitPackageTests.xctest+0xcb33b3) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #6 $s9TandemKit12CBPeripheralC23discoverCharacteristics_3forySay13CoreBluetooth0H4UUIDVGSg_AA9CBServiceCtFyyYbcfU_TA /<compiler-generated> (TandemKitPackageTests.xctest+0xcb8bc1) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #7 $sIegh_IeyBh_TR /<compiler-generated> (TandemKitPackageTests.xctest+0x5cef32) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #8 __tsan::invoke_and_release_block(void*) /llvm/compiler-rt/lib/tsan/rtl/tsan_interceptors_libdispatch.cpp:155:3 (TandemKitPackageTests.xctest+0x1fe706) (BuildId: 8760d771f1980afaaf8dfcfaf544d7aff7ac957a)
+    #9 _dispatch_lane_serial_drain crtstuff.c (libdispatch.so+0x2eb21) (BuildId: 39f6a5e2405b8354ac37bc77ab53148b35cda0c7)
+
+SUMMARY: ThreadSanitizer: data race /work/TandemKit/Sources/TandemCore/Builders/JpakeAuthBuilder.swift:67:18 in $s9TandemKit16JpakeAuthBuilderC13clearInstanceyyFZ
+==================
+some unrelated stderr line
+WARNING: ThreadSanitizer: data race (pid=8331)
+  Read of size 1 at 0x721c00017411 by thread T9 (mutexes: write M0):
+    #0 $s9TandemKit0A16PumpManagerStateV013basalDeliveryE004LoopB00cD6StatusV05BasalgE0Ovg /work/TandemKit/Sources/TandemKit/State/TandemPumpManagerState.swift:556:26 (TandemKitPackageTests.xctest+0xc7ec9f) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #1 $s9TandemKit0A11PumpManagerC10makeStatus33_D02E2FC3C3FD45783490516F5C0C9F9DLL4from04LoopB00cdF0VAA0acD5StateV_tFZ /work/TandemKit/Sources/TandemKit/PumpManager/TandemPumpManager.swift:181:39 (TandemKitPackageTests.xctest+0xc3e6e9) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #2 $s9TandemKit0A11PumpManagerC26notifyDelegateStateUpdatedyyF /work/TandemKit/Sources/TandemKit/PumpManager/TandemPumpManager.swift:303:43 (TandemKitPackageTests.xctest+0xc40904) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #3 $s9TandemKit0A16BluetoothManagerC12markLinkDown33_7E4E70600CA66FA60A9FED2D007BD313LLyyF /work/TandemKit/Sources/TandemKit/PumpManager/TandemBluetoothManager.swift:141:21 (TandemKitPackageTests.xctest+0xb9b398) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #4 $s9TandemKit0A16BluetoothManagerC15ensureConnected10completionyys5Error_pSgc_tFyyYbcfU_ /work/TandemKit/Sources/TandemKit/PumpManager/TandemBluetoothManager.swift:251:22 (TandemKitPackageTests.xctest+0xb96034) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #5 $s9TandemKit0A16BluetoothManagerC15ensureConnected10completionyys5Error_pSgc_tFyyYbcfU_TA /<compiler-generated> (TandemKitPackageTests.xctest+0xb96101) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #6 $sIegh_IeyBh_TR /<compiler-generated> (TandemKitPackageTests.xctest+0x5ce572) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #7 __tsan::invoke_and_release_block(void*) /llvm/compiler-rt/lib/tsan/rtl/tsan_interceptors_libdispatch.cpp:155:3 (TandemKitPackageTests.xctest+0x1fdd46) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #8 _dispatch_lane_serial_drain crtstuff.c (libdispatch.so+0x2eb21) (BuildId: 39f6a5e2405b8354ac37bc77ab53148b35cda0c7)
+
+  Previous write of size 1 at 0x721c00017411 by main thread:
+    #0 $s9TandemKit15UnfinalizedDoseC8rawValueACSgSDySSypG_tcfc /work/TandemKit/Sources/TandemCore/Common/UnfinalizedDose.swift:101:23 (TandemKitPackageTests.xctest+0xc952ba) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #1 $s9TandemKit15UnfinalizedDoseC8rawValueACSgSDySSypG_tcfC /work/TandemKit/Sources/TandemCore/Common/UnfinalizedDose.swift (TandemKitPackageTests.xctest+0xc94de9) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #2 $s9TandemKit0A16PumpManagerStateV8rawValueACSDySSypG_tcfC /work/TandemKit/Sources/TandemKit/State/TandemPumpManagerState.swift:304:25 (TandemKitPackageTests.xctest+0xc70c88) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #3 $s9TandemKit0A11PumpManagerC5state9bluetooth5clockAcA0acD5StateV_AA0C19BluetoothConnection_pAA0A5Clock_ptcfc /work/TandemKit/Sources/TandemKit/PumpManager/TandemPumpManager.swift:196:20 (TandemKitPackageTests.xctest+0xc3f555) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #4 $s9TandemKit0A11PumpManagerC5state9bluetooth5clockAcA0acD5StateV_AA0C19BluetoothConnection_pAA0A5Clock_ptcfC /work/TandemKit/Sources/TandemKit/PumpManager/TandemPumpManager.swift (TandemKitPackageTests.xctest+0xc3ea59) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #5 $s25TandemKitIntegrationTests17FaketandemHarnessC10makeDriver5state5clock14attachDelegateAC0H0V0aB00A16PumpManagerStateV_AJ0A5Clock_pSbtF /work/TandemKit/Tests/TandemKitIntegrationTests/FaketandemHarness.swift:157:23 (TandemKitPackageTests.xctest+0xddf266) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #6 $s25TandemKitIntegrationTests010FaketandemC8TestCaseC10makeDriver5state5clock22stageBasalScheduleSyncAA0E7HarnessC0I0V0aB00A16PumpManagerStateV_AL0A5Clock_pSbtF /work/TandemKit/Tests/TandemKitIntegrationTests/FaketandemIntegrationTestCase.swift:46:31 (TandemKitPackageTests.xctest+0xde7596) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #7 $s25TandemKitIntegrationTests09ReconnectcD0C64testRelaunchedDriverReconnectsFromPersistedStateOnTheNextCommandyyKF /work/TandemKit/Tests/TandemKitIntegrationTests/ReconnectIntegrationTests.swift:73:26 (TandemKitPackageTests.xctest+0xf3ea46) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #8 $s25TandemKitIntegrationTests09ReconnectcD0C0ab17PackageDiscoveredD0E05__alld2__ecD033_998C1D7885D1475D934A161D8FD4A39CLLSaySS_yyKcACctGvpZfiyyKcACcfu3_yyKcfu4_ /work/TandemKit/.build-tsan/x86_64-unknown-linux-gnu/debug/TandemKitPackageDiscoveredTests.derived/TandemKitIntegrationTests.swift (TandemKitPackageTests.xctest+0xfdfbb6) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #9 $s25TandemKitIntegrationTests09ReconnectcD0C0ab17PackageDiscoveredD0E05__alld2__ecD033_998C1D7885D1475D934A161D8FD4A39CLLSaySS_yyKcACctGvpZfiyyKcACcfu3_yyKcfu4_TA /<compiler-generated> (TandemKitPackageTests.xctest+0xfe0c37) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #10 $ss5Error_pIegzo_ytsAA_pIegrzo_TR /<compiler-generated> (TandemKitPackageTests.xctest+0xf74327) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #11 $ss5Error_pIegzo_ytsAA_pIegrzo_TRTA.306 /<compiler-generated> (TandemKitPackageTests.xctest+0xfe0d3f) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #12 $syts5Error_pIegrzo_sAA_pIegzo_TRTA WallClockTimeMetric.swift.o (libXCTest.so+0x2a5bb) (BuildId: 13176108ccc5f4d6c37f89e81d638e078713413a)
+    #13 $s21TandemKitPackageTests6RunnerV5$mainyyFZ /<compiler-generated> (TandemKitPackageTests.xctest+0x109da65) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #14 main /work/TandemKit/.build-tsan/x86_64-unknown-linux-gnu/debug/TandemKitPackageTests.derived/runner.swift (TandemKitPackageTests.xctest+0x109dab5) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+
+  Location is heap block of size 106 at 0x721c000173e0 allocated by main thread:
+    #0 malloc /llvm/compiler-rt/lib/tsan/rtl/tsan_interceptors_posix.cpp:666:5 (TandemKitPackageTests.xctest+0x182db0) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #1 swift_slowAlloc <null> (libswiftCore.so+0x4376e8) (BuildId: 232fee014ccd83c728c6425419c9bd65129d237b)
+    #2 $s9TandemKit0A16PumpManagerStateV8rawValueACSDySSypG_tcfC /work/TandemKit/Sources/TandemKit/State/TandemPumpManagerState.swift:304:25 (TandemKitPackageTests.xctest+0xc70c88) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #3 $s9TandemKit0A11PumpManagerC5state9bluetooth5clockAcA0acD5StateV_AA0C19BluetoothConnection_pAA0A5Clock_ptcfc /work/TandemKit/Sources/TandemKit/PumpManager/TandemPumpManager.swift:196:20 (TandemKitPackageTests.xctest+0xc3f555) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #4 $s9TandemKit0A11PumpManagerC5state9bluetooth5clockAcA0acD5StateV_AA0C19BluetoothConnection_pAA0A5Clock_ptcfC /work/TandemKit/Sources/TandemKit/PumpManager/TandemPumpManager.swift (TandemKitPackageTests.xctest+0xc3ea59) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #5 $s25TandemKitIntegrationTests17FaketandemHarnessC10makeDriver5state5clock14attachDelegateAC0H0V0aB00A16PumpManagerStateV_AJ0A5Clock_pSbtF /work/TandemKit/Tests/TandemKitIntegrationTests/FaketandemHarness.swift:157:23 (TandemKitPackageTests.xctest+0xddf266) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #6 $s25TandemKitIntegrationTests010FaketandemC8TestCaseC10makeDriver5state5clock22stageBasalScheduleSyncAA0E7HarnessC0I0V0aB00A16PumpManagerStateV_AL0A5Clock_pSbtF /work/TandemKit/Tests/TandemKitIntegrationTests/FaketandemIntegrationTestCase.swift:46:31 (TandemKitPackageTests.xctest+0xde7596) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #7 $s25TandemKitIntegrationTests09ReconnectcD0C64testRelaunchedDriverReconnectsFromPersistedStateOnTheNextCommandyyKF /work/TandemKit/Tests/TandemKitIntegrationTests/ReconnectIntegrationTests.swift:73:26 (TandemKitPackageTests.xctest+0xf3ea46) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #8 $s25TandemKitIntegrationTests09ReconnectcD0C0ab17PackageDiscoveredD0E05__alld2__ecD033_998C1D7885D1475D934A161D8FD4A39CLLSaySS_yyKcACctGvpZfiyyKcACcfu3_yyKcfu4_ /work/TandemKit/.build-tsan/x86_64-unknown-linux-gnu/debug/TandemKitPackageDiscoveredTests.derived/TandemKitIntegrationTests.swift (TandemKitPackageTests.xctest+0xfdfbb6) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #9 $s25TandemKitIntegrationTests09ReconnectcD0C0ab17PackageDiscoveredD0E05__alld2__ecD033_998C1D7885D1475D934A161D8FD4A39CLLSaySS_yyKcACctGvpZfiyyKcACcfu3_yyKcfu4_TA /<compiler-generated> (TandemKitPackageTests.xctest+0xfe0c37) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #10 $ss5Error_pIegzo_ytsAA_pIegrzo_TR /<compiler-generated> (TandemKitPackageTests.xctest+0xf74327) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #11 $ss5Error_pIegzo_ytsAA_pIegrzo_TRTA.306 /<compiler-generated> (TandemKitPackageTests.xctest+0xfe0d3f) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #12 $syts5Error_pIegrzo_sAA_pIegzo_TRTA WallClockTimeMetric.swift.o (libXCTest.so+0x2a5bb) (BuildId: 13176108ccc5f4d6c37f89e81d638e078713413a)
+    #13 $s21TandemKitPackageTests6RunnerV5$mainyyFZ /<compiler-generated> (TandemKitPackageTests.xctest+0x109da65) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #14 main /work/TandemKit/.build-tsan/x86_64-unknown-linux-gnu/debug/TandemKitPackageTests.derived/runner.swift (TandemKitPackageTests.xctest+0x109dab5) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+
+  Mutex M0 (0x720c0003a620) created at:
+    #0 pthread_mutex_init /llvm/compiler-rt/lib/tsan/rtl/tsan_interceptors_posix.cpp:1327:3 (TandemKitPackageTests.xctest+0x186293) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #1 $s10Foundation6NSLockCACycfC <null> (libFoundation.so+0x2b4d5b) (BuildId: 16d3a09814244900f51ba347551c2b1bcb880563)
+    #2 $s9TandemKit0A11PumpManagerC5state9bluetooth5clockAcA0acD5StateV_AA0C19BluetoothConnection_pAA0A5Clock_ptcfC /work/TandemKit/Sources/TandemKit/PumpManager/TandemPumpManager.swift (TandemKitPackageTests.xctest+0xc3ea59) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #3 $s25TandemKitIntegrationTests17FaketandemHarnessC10makeDriver5state5clock14attachDelegateAC0H0V0aB00A16PumpManagerStateV_AJ0A5Clock_pSbtF /work/TandemKit/Tests/TandemKitIntegrationTests/FaketandemHarness.swift:157:23 (TandemKitPackageTests.xctest+0xddf266) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #4 $s25TandemKitIntegrationTests010FaketandemC8TestCaseC10makeDriver5state5clock22stageBasalScheduleSyncAA0E7HarnessC0I0V0aB00A16PumpManagerStateV_AL0A5Clock_pSbtF /work/TandemKit/Tests/TandemKitIntegrationTests/FaketandemIntegrationTestCase.swift:46:31 (TandemKitPackageTests.xctest+0xde7596) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #5 $s25TandemKitIntegrationTests09ReconnectcD0C64testRelaunchedDriverReconnectsFromPersistedStateOnTheNextCommandyyKF /work/TandemKit/Tests/TandemKitIntegrationTests/ReconnectIntegrationTests.swift:73:26 (TandemKitPackageTests.xctest+0xf3ea46) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #6 $s25TandemKitIntegrationTests09ReconnectcD0C0ab17PackageDiscoveredD0E05__alld2__ecD033_998C1D7885D1475D934A161D8FD4A39CLLSaySS_yyKcACctGvpZfiyyKcACcfu3_yyKcfu4_ /work/TandemKit/.build-tsan/x86_64-unknown-linux-gnu/debug/TandemKitPackageDiscoveredTests.derived/TandemKitIntegrationTests.swift (TandemKitPackageTests.xctest+0xfdfbb6) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #7 $s25TandemKitIntegrationTests09ReconnectcD0C0ab17PackageDiscoveredD0E05__alld2__ecD033_998C1D7885D1475D934A161D8FD4A39CLLSaySS_yyKcACctGvpZfiyyKcACcfu3_yyKcfu4_TA /<compiler-generated> (TandemKitPackageTests.xctest+0xfe0c37) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #8 $ss5Error_pIegzo_ytsAA_pIegrzo_TR /<compiler-generated> (TandemKitPackageTests.xctest+0xf74327) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #9 $ss5Error_pIegzo_ytsAA_pIegrzo_TRTA.306 /<compiler-generated> (TandemKitPackageTests.xctest+0xfe0d3f) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #10 $syts5Error_pIegrzo_sAA_pIegzo_TRTA WallClockTimeMetric.swift.o (libXCTest.so+0x2a5bb) (BuildId: 13176108ccc5f4d6c37f89e81d638e078713413a)
+    #11 $s21TandemKitPackageTests6RunnerV5$mainyyFZ /<compiler-generated> (TandemKitPackageTests.xctest+0x109da65) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #12 main /work/TandemKit/.build-tsan/x86_64-unknown-linux-gnu/debug/TandemKitPackageTests.derived/runner.swift (TandemKitPackageTests.xctest+0x109dab5) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+
+  Thread T9 (tid=8343, running) created by thread T6 at:
+    #0 pthread_create /llvm/compiler-rt/lib/tsan/rtl/tsan_interceptors_posix.cpp:1023:3 (TandemKitPackageTests.xctest+0x184901) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #1 _dispatch_root_queue_poke_slow queue.c (libdispatch.so+0x31b75) (BuildId: 39f6a5e2405b8354ac37bc77ab53148b35cda0c7)
+    #2 $s8Dispatch0A5QueueC5async5group3qos5flags7executeyAA0A5GroupCSg_AA0A3QoSVAA0A13WorkItemFlagsVyyYbXBtF <null> (libswiftDispatch.so+0x1c56c) (BuildId: c4222a4f8ab8108c4c6a0440e9975d6547645a64)
+    #3 $s9TandemKit0A16BluetoothManagerC05applyC5State33_7E4E70600CA66FA60A9FED2D007BD313LLyy04CoreC009CBManagerF0OF /work/TandemKit/Sources/TandemKit/PumpManager/TandemBluetoothManager.swift:459:9 (TandemKitPackageTests.xctest+0xb97c15) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #4 $s9TandemKit0A16BluetoothManagerC07centralD14DidUpdateStateyyAA09CBCentralD0CF /work/TandemKit/Sources/TandemKit/PumpManager/TandemBluetoothManager.swift:424:9 (TandemKitPackageTests.xctest+0xba0ab5) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #5 $s9TandemKit0A16BluetoothManagerCAA09CBCentralD8DelegateA2aDP07centralD14DidUpdateStateyyAA0eD0CFTW /<compiler-generated> (TandemKitPackageTests.xctest+0xb98a3d) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #6 $s9TandemKit16CBCentralManagerC8delegate5queue8endpoint12scanIntervalAcA0cD8Delegate_pSg_8Dispatch0K5QueueCSgAA18SocketPumpEndpointVSgSdtcfcyyYbcfU_ /work/TandemKit/Sources/TandemKit/PumpManager/VirtualPump/VirtualCoreBluetooth.swift:156:28 (TandemKitPackageTests.xctest+0xcaa8f5) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #7 $s9TandemKit16CBCentralManagerC8delegate5queue8endpoint12scanIntervalAcA0cD8Delegate_pSg_8Dispatch0K5QueueCSgAA18SocketPumpEndpointVSgSdtcfcyyYbcfU_TA /<compiler-generated> (TandemKitPackageTests.xctest+0xcb654d) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #8 $sIegh_IeyBh_TR /<compiler-generated> (TandemKitPackageTests.xctest+0x5ce572) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #9 __tsan::invoke_and_release_block(void*) /llvm/compiler-rt/lib/tsan/rtl/tsan_interceptors_libdispatch.cpp:155:3 (TandemKitPackageTests.xctest+0x1fdd46) (BuildId: 0a189ac13a27bac55508a6aa194f816832d84450)
+    #10 _dispatch_lane_serial_drain crtstuff.c (libdispatch.so+0x2eb21) (BuildId: 39f6a5e2405b8354ac37bc77ab53148b35cda0c7)
+
+SUMMARY: ThreadSanitizer: data race /work/TandemKit/Sources/TandemKit/State/TandemPumpManagerState.swift:556:26 in $s9TandemKit0A16PumpManagerStateV013basalDeliveryE004LoopB00cD6StatusV05BasalgE0Ovg

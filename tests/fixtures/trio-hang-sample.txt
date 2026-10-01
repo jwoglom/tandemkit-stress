@@ -1,0 +1,15 @@
+Analysis of sampling Trio (pid 4242) every 1 millisecond
+Process:         Trio [4242]
+Call graph:
+    2580 Thread_1234   DispatchQueue_1: com.apple.main-thread  (serial)
+    + 2580 start  (in dyld) + 2840  [0x180c6e0e0]
+    +   2580 main  (in Trio.debug.dylib) + 100  [0x100002000]
+    +     2580 UIApplicationMain  (in UIKitCore) + 50  [0x18a000000]
+    +       2580 closure #1 in TandemPumpManager.status.getter  (in TandemKit) + 40  [0x104b00000]
+    +         2580 NSRecursiveLock.lock()  (in Foundation) + 12  [0x181000000]
+    +           2580 __psynch_mutexwait  (in libsystem_kernel.dylib) + 8  [0x180f00000]
+    2580 Thread_1235: com.jwoglom.TandemKit.commandQueue
+    + 2580 _dispatch_worker_thread2  (in libdispatch.dylib) + 52  [0x180100000]
+    +   2580 TandemPeripheralManager.write<A>(_:maxChunkSize:)  (in TandemKit) + 400  [0x104b10000]
+
+Total number in stack (recursive counted multiple times):

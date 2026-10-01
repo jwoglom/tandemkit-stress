@@ -1,0 +1,31 @@
+2026-10-01 05:00:01.123 Trio[4242:1234567] some app log line
+==================
+WARNING: ThreadSanitizer: data race (pid=4242)
+  Read of size 8 at 0x00010b8e3a40 by thread T7:
+    #0 TandemPumpManager.bolusProgressReport.getter <null> (TandemKit:arm64+0x1a2b34)
+    #1 TandemPumpManager.createBolusProgressReporter(reportingOn:) TandemPumpManager.swift:545 (TandemKit:arm64+0x1a2c10)
+    #2 closure #1 in APSManager.createBolusReporter() APSManager.swift:1419 (Trio.debug.dylib:arm64+0x88f00)
+    #3 _dispatch_call_block_and_release <null> (libdispatch.dylib:arm64e+0x2370)
+
+  Previous write of size 8 at 0x00010b8e3a40 by thread T3:
+    #0 TandemPumpManager.bolusProgressReport.setter <null> (TandemKit:arm64+0x1a2d00)
+    #1 closure #1 in TandemPumpManager.enactBolus(units:activationType:completion:) TandemPumpManager.swift:650 (TandemKit:arm64+0x1b0000)
+    #2 _dispatch_client_callout <null> (libdispatch.dylib:arm64e+0x3fd4)
+
+  Location is heap block of size 512 at 0x00010b8e3900 allocated by main thread:
+    #0 malloc <null> (libclang_rt.tsan_iossim_dynamic.dylib:arm64+0x4f2a0)
+    #1 swift_allocObject <null> (libswiftCore.dylib:arm64e+0x3a1b0)
+    #2 TandemPumpManager.init(state:bluetooth:clock:) TandemPumpManager.swift:190 (TandemKit:arm64+0x190000)
+
+  Thread T7 (tid=1234567, running) is a GCD worker thread
+
+  Thread T3 (tid=1234560, running) is a GCD worker thread
+
+SUMMARY: ThreadSanitizer: data race TandemPumpManager.swift:545 in TandemPumpManager.createBolusProgressReporter(reportingOn:)
+==================
+Main Thread Checker: UI API called on a background thread: -[UIView setNeedsLayout]
+PID: 4242, TID: 1234599, Thread name: (none), Queue name: com.jwoglom.TandemKit.commandQueue, QoS: 0
+Backtrace:
+4   TandemKitUI                         0x0000000104a1b2c4 $s11TandemKitUI15StatusHUDViewC6updateyyF + 120
+5   TandemKit                           0x0000000104b2c3d4 $s9TandemKit0A11PumpManagerC26notifyDelegateStateUpdatedyyF + 64
+6   libdispatch.dylib                   0x00000001800e2370 _dispatch_call_block_and_release + 32

@@ -1,0 +1,3 @@
+[submodule "trio-test-harness"]
+	path = trio-test-harness
+	url = https://github.com/jwoglom/trio-test-harness.git
