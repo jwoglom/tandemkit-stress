@@ -56,8 +56,9 @@ on:
         options: ["26.2"]
         default: "26.2"
 
+# contents: write is for the release assets that issues attach files with (tkstress/issues.py, attach).
 permissions:
-  contents: read
+  contents: write
   issues: write
 
 # Shared with stress-sim-nightly.yml: both use the same simulator and build cache on the runner.

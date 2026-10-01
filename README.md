@@ -129,8 +129,13 @@ One issue per distinct failure, identified by kind plus the top non-system stack
   - the 30 chaos actions before it, the last 80 messages faketandem saw (kind, message, txId, faults, cargo) and
     the last 200 lines of TandemKit's log
   - commits, seed and the command to reproduce it
+  - the finding's files attached: the `.ips` crash report, the hang sample, the launch's stderr, screenshots
 
   Sections are collapsed and cut to fit GitHub's limit.
+- **Attachments:** the REST API cannot attach a file to an issue, so files go up as assets of a monthly pre-release,
+  `stress-attachments-YYYY-MM`, and the issue links them. That needs `contents: write`, which the workflows grant;
+  a local run uses your `gh` login. A crash report loses its crash-reporter key, incident ID, home path and the
+  simulator's device ID before upload. Its image UUIDs stay, so Xcode can still symbolicate it.
 - **Repeats:** a fingerprint seen again in the same run gets one closing comment with its count and rounds. Seen in a
   later run, it gets a comment on the open issue with that run's report and context. A failure whose issue was closed
   gets a new issue linking the old one.

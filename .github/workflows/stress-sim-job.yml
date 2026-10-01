@@ -59,8 +59,9 @@ on:
       TRIO_E2E_APP_KEY:
         required: true
 
+# contents: write is for the release assets that issues attach files with (tkstress/issues.py, attach).
 permissions:
-  contents: read
+  contents: write
   issues: write
 
 jobs:

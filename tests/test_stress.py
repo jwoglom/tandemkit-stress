@@ -12,6 +12,7 @@ import os
 import plistlib
 import random
 import tempfile
+import time
 import unittest
 from dataclasses import asdict
 from pathlib import Path
@@ -353,6 +354,42 @@ class LiveFiling(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             I.file_issues(self.run_dir, "o/r")
         self.assertEqual(self.creates_and_comments(), (creates, comments))
+
+    def test_a_crash_report_is_attached_scrubbed_with_its_image_uuids_kept(self):
+        from unittest import mock
+        uploaded, releases = {}, set()
+
+        def gh(args, **_):
+            self.calls.append(args)
+            if args[:2] == ["release", "view"]:
+                return mock.Mock(returncode=0 if args[2] in releases else 1, stdout="", stderr="release not found")
+            if args[:2] == ["release", "create"]:
+                releases.add(args[2])
+            if args[:2] == ["release", "upload"]:
+                uploaded[Path(args[3]).name] = Path(args[3]).read_text()
+            out = "[]" if args[:2] == ["issue", "list"] else (
+                "https://github.com/o/r/issues/8\n" if args[:2] == ["issue", "create"] else "")
+            return mock.Mock(returncode=0, stdout=out, stderr="")
+        sim = f"{Path.home()}/Library/Developer/CoreSimulator/Devices/FF1FF95A-5DF6-43E3-8D02-208D4C55F851/data"
+        ips = (json.dumps({"app_name": "Trio", "crashReporterKey": "machine-key", "incident_id": "1234"}) + "\n"
+               + json.dumps({"procPath": f"{sim}/Trio.app/Trio", "threads": [],
+                             "usedImages": [{"uuid": "4c4c4489-5555-3144-a1b2-c3d4e5f60718", "name": "TandemKit"}]}))
+        (self.run_dir / "crashes").mkdir()
+        (self.run_dir / "crashes" / "Trio-2026-10-01-155804.ips").write_text(ips)
+        f = self.finding()
+        f.update(kind="crash", evidence=["crashes/Trio-2026-10-01-155804.ips"])
+        with mock.patch.object(I, "_gh", gh):
+            entry = I.publish(f, "o/r", {"args": {}}, self.run_dir)
+        (name, text), = uploaded.items()
+        self.assertTrue(name.startswith(f["fp"]) and name.endswith("Trio-2026-10-01-155804.ips"))
+        self.assertNotIn("machine-key", text)
+        self.assertNotIn("1234", text)
+        self.assertIn("~/Library/Developer/CoreSimulator/Devices/<device>/data", text)
+        self.assertIn("4c4c4489-5555-3144-a1b2-c3d4e5f60718", text)
+        body = next(c for c in self.calls if c[:2] == ["issue", "create"])
+        body = body[body.index("--body") + 1]
+        self.assertIn(f"/releases/download/{time.strftime('stress-attachments-%Y-%m')}/{name}", body)
+        self.assertEqual(len(entry["attachments"]), 1)
 
     def test_a_body_with_huge_context_still_fits(self):
         f = self.finding()

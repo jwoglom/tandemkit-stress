@@ -11,6 +11,11 @@ An issue is meant to be read without the run's logs. Besides the full report it 
 the finding first appeared (lane.capture_context): round, launch and app memory, the chaos actions before it, the
 messages faketandem saw, and TandemKit's log. Sections are cut to fit GitHub's 65536-character limit.
 
+The finding's files (crash report, hang sample, the launch's stderr, screenshots) are attached. The REST API cannot
+attach a file to an issue, so they are uploaded as assets of a monthly pre-release, stress-attachments-YYYY-MM, which
+the issue links; that needs contents: write. A crash report loses the machine's crash-reporter identifiers, the home
+path and the simulator's device id first, and keeps its image UUIDs, which symbolication needs.
+
 The repository is --repo, else TKSTRESS_ISSUES_REPO, else GITHUB_REPOSITORY in CI, else this checkout's origin: a run
 started by hand files through the local `gh` login into the same place CI does. TKSTRESS_ISSUES_TOKEN, when set, is
 the token `gh` files with (CI: the workflow's GITHUB_TOKEN, while GH_TOKEN holds the App token the build needs).
@@ -25,6 +30,8 @@ import json
 import os
 import queue
 import re
+import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -38,11 +45,35 @@ LEDGER = "issues.json"
 BODY_LIMIT = 60000          # GitHub refuses bodies over 65536 characters
 REPORT_LIMIT = 20000
 SECTION_LIMIT = 12000
+ATTACH_MAX_BYTES = 50 * 1024 * 1024
+IPS_IDENTIFIERS = ("crashReporterKey", "incident", "incident_id", "sessionID", "beta_identifier")
 LABELS = {"stress": ("5319e7", "Found by tandemkit-stress (simulator + faketandem)")}
 KIND_COLOR = "fbca04"
 
 
+def scrub_paths(text: str) -> str:
+    home = str(Path.home())
+    if home and home != "/":
+        text = text.replace(home, "~")
+    text = re.sub(r"(CoreSimulator/Devices/)[0-9A-Fa-f-]{36}", r"\1<device>", text)
+    return re.sub(r"(Containers/(?:Bundle|Data|Shared/AppGroup)/Application/)[0-9A-Fa-f-]{36}", r"\1<app>", text)
+
+
+def scrub_ips(text: str) -> str:
+    """A crash report fit to attach: no machine identifiers or home paths, image UUIDs kept for symbolication."""
+    head, _, rest = text.partition("\n")
+    try:
+        header, body = json.loads(head), json.loads(rest)
+    except ValueError:
+        return scrub_paths(text)
+    for part in (header, body):
+        for k in IPS_IDENTIFIERS:
+            part.pop(k, None)
+    return scrub_paths(json.dumps(header) + "\n" + json.dumps(body, indent=2))
+
+
 def scrub(text: str) -> str:
+    text = scrub_paths(text)
     text = re.sub(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", "<uuid>", text)
     text = re.sub(r"\b[0-9a-fA-F]{32,}\b", "<hex>", text)
     text = re.sub(r"\b[A-Za-z0-9+/]{40,}={0,2}", "<base64>", text)
@@ -164,7 +195,19 @@ def _seen_line(f: dict) -> str:
     return f"seen {f['occurrences']}× in this run so far{where}"
 
 
-def issue_body(f: dict, meta: dict, run_dir: Path) -> str:
+def _attachment_lines(f: dict, attachments: tuple[list[str], list[str]] | None) -> list[str]:
+    if not f.get("evidence"):
+        return []
+    links, problems = attachments or ([], [])
+    lines = ["### Attachments", "", *links]
+    if problems:
+        lines += ["", "Not attached, so in the run directory (the Actions artifact): " + "; ".join(problems)]
+    elif not links:
+        lines += [f"- `{e}` (in the run directory)" for e in f["evidence"]]
+    return lines + [""]
+
+
+def issue_body(f: dict, meta: dict, run_dir: Path, attachments: tuple[list[str], list[str]] | None = None) -> str:
     args = meta.get("args") or {}
     subs = (meta.get("git") or {}).get("submodules") or {}
     when = (f.get("context") or {}).get("When")
@@ -176,8 +219,7 @@ def issue_body(f: dict, meta: dict, run_dir: Path) -> str:
         lines += ["### Signature", "", "```", *f["signature"], "```", ""]
         lines += _evidence_and_context(f, section_limit)
         lines += ["### Environment", "", *environment_lines(meta), ""]
-        if f.get("evidence"):
-            lines += ["### Files (in the run directory)", "", *[f"- `{e}`" for e in f["evidence"]], ""]
+        lines += _attachment_lines(f, attachments)
         lines += ["### Reproduce", "", "```",
                   f"./tandemkit-stress run --trio {args.get('trio')} --tandemkit "
                   f"{subs.get('TandemKit') or args.get('tandemkit')} --seed {meta.get('seed')} --intensity "
@@ -190,7 +232,7 @@ def issue_body(f: dict, meta: dict, run_dir: Path) -> str:
     return _fit(render)
 
 
-def comment_body(f: dict, meta: dict, run_dir: Path) -> str:
+def comment_body(f: dict, meta: dict, run_dir: Path, attachments: tuple[list[str], list[str]] | None = None) -> str:
     when = (f.get("context") or {}).get("When")
 
     def render(section_limit: int) -> str:
@@ -198,8 +240,9 @@ def comment_body(f: dict, meta: dict, run_dir: Path) -> str:
         if when:
             lines += [f"When: {when}", ""]
         lines += _evidence_and_context(f, section_limit)
-        lines += ["### Environment", "", *environment_lines(meta), "", run_line(run_dir), "", "---",
-                  "_Filed by tandemkit-stress_"]
+        lines += ["### Environment", "", *environment_lines(meta), ""]
+        lines += _attachment_lines(f, attachments)
+        lines += [run_line(run_dir), "", "---", "_Filed by tandemkit-stress_"]
         return scrub("\n".join(lines))
     return _fit(render)
 
@@ -218,15 +261,59 @@ def write_ledger(run_dir: Path, ledger: dict[str, dict]) -> None:
     tmp.replace(run_dir / LEDGER)
 
 
+def _gh_error(cp) -> str:
+    out = ((cp.stderr or "") + (cp.stdout or "")).strip()
+    return out.splitlines()[-1][:200] if out else f"gh exited {cp.returncode}"
+
+
+def attach(repo: str, run_dir: Path, rel_paths: list[str], label: str) -> tuple[list[str], list[str]]:
+    """Upload a finding's files as assets of this month's attachments release: (markdown links, problems)."""
+    files = [(r, run_dir / r) for r in rel_paths if (run_dir / r).is_file()]
+    if not files:
+        return [], []
+    tag = time.strftime("stress-attachments-%Y-%m")
+    if _gh(["release", "view", tag, "--repo", repo], check=False).returncode != 0:
+        cp = _gh(["release", "create", tag, "--repo", repo, "--prerelease", "--title", f"Stress attachments {tag[-7:]}",
+                  "--notes", "Crash reports, samples, logs and screenshots that tandemkit-stress issues link to."],
+                 check=False)
+        if cp.returncode != 0 and _gh(["release", "view", tag, "--repo", repo], check=False).returncode != 0:
+            return [], [f"no release to attach to ({_gh_error(cp)})"]
+    links, problems = [], []
+    with tempfile.TemporaryDirectory() as d:
+        for rel, path in files:
+            if path.stat().st_size > ATTACH_MAX_BYTES:
+                problems.append(f"`{rel}` is over {ATTACH_MAX_BYTES // 2**20} MB")
+                continue
+            name = re.sub(r"[^\w.-]+", "-", f"{label}-{path.name}")
+            out = Path(d) / name
+            if path.suffix == ".ips":
+                out.write_text(scrub_ips(path.read_text(errors="replace")))
+            elif path.suffix in (".txt", ".stderr", ".log", ".json", ".jsonl"):
+                out.write_text(scrub(path.read_text(errors="replace")))
+            else:
+                shutil.copy(path, out)
+            cp = _gh(["release", "upload", tag, str(out), "--repo", repo, "--clobber"], check=False)
+            if cp.returncode == 0:
+                links.append(f"- [{path.name}](https://github.com/{repo}/releases/download/{tag}/{name}) (`{rel}`)")
+            else:
+                problems.append(f"`{rel}` ({_gh_error(cp)})")
+    return links, problems
+
+
 def publish(f: dict, repo: str, meta: dict, run_dir: Path) -> dict:
-    """File one finding: a comment on its open issue, else a new issue. Returns its issues.json entry."""
+    """File one finding, with its files attached: a comment on its open issue, else a new issue. Returns its
+    issues.json entry."""
     entry = {"fp": f["fp"], "kind": f["kind"], "occurrences": f["occurrences"],
              "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    attachments = attach(repo, run_dir, f.get("evidence") or [], f"{f['fp']}-{run_dir.name}")
+    if attachments[0]:
+        entry["attachments"] = [re.search(r"\((https://[^)]+)\)", link).group(1) for link in attachments[0]]
     existing = find_issue(repo, f["fp"])
     if existing and existing["state"] == "OPEN":
-        _gh(["issue", "comment", str(existing["number"]), "--repo", repo, "--body", comment_body(f, meta, run_dir)])
+        _gh(["issue", "comment", str(existing["number"]), "--repo", repo, "--body",
+             comment_body(f, meta, run_dir, attachments)])
         return {**entry, "action": "commented", "url": existing["url"], "number": existing["number"]}
-    body = issue_body(f, meta, run_dir)
+    body = issue_body(f, meta, run_dir, attachments)
     if existing:
         body = body[:BODY_LIMIT - 200] + f"\n\nThis fingerprint was previously tracked in {existing['url']} (closed); it came back."
     cp = _gh(["issue", "create", "--repo", repo, "--title", scrub(f"[stress] {f['title']}")[:250], "--body", body,

@@ -139,9 +139,12 @@ workflow with no trigger of its own; both of them call it.
   - one issue per fingerprint, marked `<!-- stress-fingerprint: … -->`, labelled `stress` and `stress:<kind>`
   - the body carries the full report and the context captured when it appeared (actions, faketandem messages,
     TandemKit's log, round/launch/memory), so it reads without the artifact
+  - the finding's files (`.ips`, hang sample, launch stderr, screenshots) are attached as assets of the monthly
+    pre-release `stress-attachments-YYYY-MM`, which needs `contents: write`; a crash report is uploaded without the
+    machine's crash-reporter identifiers, home path or simulator device ID, image UUIDs kept
   - a repeat within the run gets one closing comment with its count; one in a later run comments on the open issue
   - a fingerprint whose issue was closed gets a new issue that links the old one
-  - bodies are scrubbed of long hex/base64 strings, UUIDs and home paths
+  - bodies are scrubbed of long hex/base64 strings, UUIDs, simulator device and app container IDs and home paths
   - nothing is filed in TandemKit; a confirmed driver bug is promoted there by hand
 - **Artifacts.** The whole run directory, kept for 14 days.
 

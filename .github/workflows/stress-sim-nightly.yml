@@ -11,8 +11,9 @@ on:
     - cron: "0 6 * * *"
       timezone: "America/New_York"
 
+# contents: write is for the release assets that issues attach files with (tkstress/issues.py, attach).
 permissions:
-  contents: read
+  contents: write
   issues: write
 
 # Shared with stress-sim-manual.yml: both use the same simulator and build cache on the runner.
