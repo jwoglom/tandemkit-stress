@@ -10,8 +10,8 @@ stress clock starts at the first round: neither the build nor the simulator setu
 
 ```
 ./tandemkit-stress run                                     # build closed-beta Trio + TandemKit dev, then 60 min of stress
-./tandemkit-stress run --minutes 360                       # the nightly job's length
-./tandemkit-stress run --minutes 360 --file-issues         # the same by hand, filing through your `gh` login
+./tandemkit-stress run --minutes 200                       # about what each nightly job gets
+./tandemkit-stress run --minutes 200 --file-issues         # the same by hand, filing through your `gh` login
 ./tandemkit-stress run --minutes 25 --seed 42 --intensity high
 ./tandemkit-stress run --tandemkit jwoglom/TandemKit#470   # a TandemKit PR
 ./tandemkit-stress run --app <Trio.app> --minutes 15       # reuse a virtual-pump build, skip checkout + build
@@ -54,10 +54,10 @@ Exit codes:
 |---|---|
 | 0 | Clean, or (`build`) built. |
 | 1 | Findings. |
-| 2 | Harness or setup failure. |
+| 2 | Harness or setup failure, or stopped by a signal (status `interrupted`; a summary is still written). |
 | 3 | Trio does not build against that TandemKit. |
 | 4 | Not run: another stress run on this machine held the lane. |
-| 5 | Not run: the build stopped at `--build-minutes` (status `build-incomplete`); the next build continues from DerivedData. |
+| 5 | Not run: the build stopped at `--build-minutes` (status `build-incomplete`; the next build continues from DerivedData), or `--until` left no time for a round (status `no-time`). |
 
 Each run leaves `summary.md`, `result.json` and `findings.json` in `runs/<ts>-stress-<ref>/`.
 
@@ -99,22 +99,26 @@ did not come up), the run continues with pump, link and app chaos.
 Two workflows run the lane on the self-hosted macOS workers. The job itself is `stress-sim-job.yml`, a reusable
 workflow with no trigger of its own; both of them call it.
 
-| Workflow | Trigger | Build limit | Stress | Job limit |
-|---|---|---|---|---|
-| `stress-sim-nightly.yml` | 02:00 America/New_York every night (the schedule's `timezone`, so it follows daylight saving) | 120 minutes | 360 minutes | 525 minutes |
-| `stress-sim-manual.yml` | `workflow_dispatch`, with inputs for the TandemKit ref, seed, intensity, sanitizer and chaos categories | `build_minutes`, 120 by default | `minutes`, 60 by default | `build_minutes` + `minutes` + 45 |
+| Workflow | Trigger | Build limit | Stress |
+|---|---|---|---|
+| `stress-sim-nightly.yml` | 02:00 and 06:00 America/New_York every night (the schedule's `timezone`, so it follows daylight saving) | 120 minutes | until 20 minutes before the runner's limit: about 3 hours 20 after a warm build |
+| `stress-sim-manual.yml` | `workflow_dispatch`, with inputs for the TandemKit ref, seed, intensity, sanitizer and chaos categories | `build_minutes`, 120 by default | `minutes`, 60 by default, cut at the same point |
 
 - **Two steps.** The job's Build step runs `tandemkit-stress build --build-minutes …`, and its Stress step runs
   `tandemkit-stress run --build <that run directory> --minutes …` only if the build finished. The job is green
   only when the stress ran and found nothing: a build stopped at its limit, a busy lane or a harness error fail it
   too, each with its own annotation. The next run continues a stopped build from DerivedData.
+- **The runner's 4-hour limit.** The self-hosted runners stop a job 4 hours after it starts ("The runner has
+  received a shutdown signal"). Whatever has not been uploaded by then is lost, issues included. So the job keeps
+  its own clock (`runner_limit_minutes`, 240):
+  - The Build step's limit is `build_minutes`, or less if the build would leave under 50 minutes before the wall.
+  - The Stress step passes `--until` 20 minutes before the wall, so the last recovery check, collection, issues and
+    uploads finish inside it.
+  - A job that started late, because the runner was busy, is cut by the same wall.
 - **Time.** `minutes` is the stress alone, from the first round; the build has its own limit. A limit is a ceiling,
-  not time held: a warm build takes minutes and the job ends that much sooner. The 45 minutes on top cover
-  checkout, simulator setup, the last recovery check, collection, issues and artifacts. A 6-hour stress at 4-minute
-  rounds is about 80 rounds; an hour, about 13.
-- **The manual job's limit** is worked out in a short `plan` job on a hosted runner, since expressions cannot add.
-  It must stay within 24 hours (`minutes` + `build_minutes` ≤ 1395), the lifetime of the `GITHUB_TOKEN` the job
-  needs at the end to file issues.
+  not time held: a warm build takes minutes and the job ends that much sooner. The nightly asks for 240 minutes and
+  gets what fits, about 50 rounds at 4 minutes each per job. When `--until` cuts a run short, its summary says so.
+  A signal (job cancelled, runner shutting down) still writes a summary and collects what it can.
 - **One at a time.** Both workflows share the `stress-sim` concurrency group: a manual run started during the
   nightly waits for it, and the other way round. GitHub keeps only one waiting run per group, so a second manual
   run started while one waits replaces it.

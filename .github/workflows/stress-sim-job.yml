@@ -2,8 +2,9 @@
 # TandemKit dev, built with the virtual pump and ThreadSanitizer, on the iOS Simulator against faketandem, while
 # `tandemkit-stress run` injects pump-side events, link faults and app kills (docs/lane.md). Findings become issues in
 # this repository: one per fingerprint, a repeat comments on the open issue.
-# The build is its own step, with its own limit, and `minutes` is the stress alone.
-# It has no trigger of its own: stress-sim-nightly.yml (6 hours from 02:00 New York time) and stress-sim-manual.yml
+# The build is its own step, with its own limit, and `minutes` is the stress alone. The self-hosted runners stop a
+# job 4 hours after it starts, losing everything not yet uploaded, so the job finishes inside runner_limit_minutes.
+# It has no trigger of its own: stress-sim-nightly.yml (02:00 and 06:00 New York time) and stress-sim-manual.yml
 # (on demand, an hour by default) call it.
 name: Stress job
 
@@ -18,10 +19,10 @@ on:
         description: "Most minutes the build may take; a build stopped there is continued by the next run"
         type: number
         required: true
-      timeout_minutes:
-        description: "The job's limit: build_minutes + minutes + 45 (checkout, setup, the last check, issues, artifacts)"
+      runner_limit_minutes:
+        description: "When the runner stops the job; the stress ends 20 minutes before, for collection, issues and uploads"
         type: number
-        required: true
+        default: 240
       trio:
         type: string
         default: "nightscout/Trio:feat/tandem-closed-beta"
@@ -65,7 +66,7 @@ permissions:
 jobs:
   stress:
     runs-on: [self-hosted, macOS, worker]
-    timeout-minutes: ${{ inputs.timeout_minutes }}
+    timeout-minutes: ${{ inputs.runner_limit_minutes }}
     env:
       # Inputs reach scripts only through env, never interpolated into them.
       IN_TRIO: ${{ inputs.trio || 'nightscout/Trio:feat/tandem-closed-beta' }}
@@ -82,6 +83,11 @@ jobs:
       TH_GIT_MIRRORS: /Volumes/work/mirrors
       TH_WDA_PREBUILT: /Volumes/work/cache/wda/current
     steps:
+      - name: Start the clock
+        env:
+          LIMIT: ${{ inputs.runner_limit_minutes }}
+        run: echo "JOB_WALL=$(( $(date +%s) + LIMIT * 60 ))" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
 
       - name: Pinned trio-test-harness commit
@@ -145,8 +151,12 @@ jobs:
           IN_BUILD_MINUTES: ${{ inputs.build_minutes }}
         run: |
           set -uo pipefail
+          # Room after the build for the 20-minute tail and setup plus a first stretch of stress.
+          fits=$(( (JOB_WALL - $(date +%s)) / 60 - 20 - 30 ))
+          build=$(( ${IN_BUILD_MINUTES%.*} < fits ? ${IN_BUILD_MINUTES%.*} : fits ))
+          (( build >= 1 )) || build=1
           args=(--trio "$IN_TRIO" --tandemkit "$IN_TANDEMKIT" --sanitizer "$IN_SANITIZER"
-                --build-minutes "$IN_BUILD_MINUTES" --result-json "$RUNNER_TEMP/build-result.json")
+                --build-minutes "$build" --result-json "$RUNNER_TEMP/build-result.json")
           [ -z "$IN_FAKETANDEM_REF" ] || args+=(--faketandem-ref "$IN_FAKETANDEM_REF")
           rc=0
           ./tandemkit-stress build "${args[@]}" || rc=$?
@@ -163,8 +173,8 @@ jobs:
           IN_MINUTES: ${{ inputs.minutes }}
         run: |
           set -uo pipefail
-          args=(--build "$RUN_DIR" --minutes "$IN_MINUTES" --intensity "$IN_INTENSITY"
-                --result-json "$RUNNER_TEMP/stress-result.json")
+          args=(--build "$RUN_DIR" --minutes "$IN_MINUTES" --until "$(( JOB_WALL - 20 * 60 ))"
+                --intensity "$IN_INTENSITY" --result-json "$RUNNER_TEMP/stress-result.json")
           [ -z "$IN_SEED" ] || args+=(--seed "$IN_SEED")
           [ -z "$IN_CATEGORIES" ] || args+=(--categories "$IN_CATEGORIES")
           rc=0
@@ -205,7 +215,7 @@ jobs:
         run: |
           case "$BUILD" in
             built) ;;
-            build-incomplete) echo "::error title=Not tested: build incomplete::the build did not finish within $BUILD_MINUTES minutes, so nothing was stress-tested. The next run continues it from DerivedData; raise build_minutes for a cold cache."; exit 1 ;;
+            build-incomplete) echo "::error title=Not tested: build incomplete::the build did not finish within its limit (build_minutes $BUILD_MINUTES, less if the runner's time limit came first), so nothing was stress-tested. The next run continues it from DerivedData."; exit 1 ;;
             build-failed) echo "::error title=Build break::Trio does not build against this TandemKit"; exit 1 ;;
             busy) echo "::error title=Not tested: lane busy::another stress run on this runner's Mac held the lane; see the job summary"; exit 1 ;;
             *) echo "::error title=Harness error::the build step did not complete; see its log"; exit 1 ;;
@@ -214,5 +224,6 @@ jobs:
             0) echo "clean" ;;
             1) echo "::error title=Stress findings::see the job summary and the issues filed"; exit 1 ;;
             4) echo "::error title=Not tested: lane busy::another stress run on this runner's Mac took the lane after the build; see the job summary"; exit 1 ;;
+            5) echo "::error title=Not tested: no time::the build and setup left no time for a round before the runner's time limit"; exit 1 ;;
             *) echo "::error title=Harness error::the stress step did not complete; see its log"; exit 1 ;;
           esac

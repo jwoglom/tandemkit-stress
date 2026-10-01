@@ -10,7 +10,7 @@ Run commands from the tandemkit-stress checkout (`./setup.sh` once). Full descri
 ## Run
 | Want | Command |
 |---|---|
-| The nightly configuration (closed-beta Trio + TandemKit dev, TSan, intensity cycling) | `./tandemkit-stress run --minutes 360` (build first, then `--minutes` of stress; default 60) |
+| The nightly configuration (closed-beta Trio + TandemKit dev, TSan, intensity cycling) | `./tandemkit-stress run --minutes 200` (build first, then `--minutes` of stress; default 60) |
 | Only build, or stress a build made earlier | `./tandemkit-stress build [--build-minutes 120]` · `./tandemkit-stress run --build runs/<run>` |
 | On a Mac without Actions, filing issues with the local `gh` login | add `--file-issues` (checks `gh` first; repo: this checkout's origin) |
 | Shorter / reproducible / harsher | `./tandemkit-stress run --minutes 25 --seed 42 --intensity high` |
@@ -35,8 +35,8 @@ plus `FAKETANDEM_JAR`. `./tandemkit-stress doctor` checks all of this.
   - `logs/tandem_log.txt`.
   - `faketandem.log`.
   - `faketandem-requests.jsonl`: every message the pump saw, with sequence numbers.
-- Exit code and `result.json` status: 0 clean or built, 1 findings, 2 harness failure, 3 Trio does not build,
-  4 lane busy, 5 build stopped at `--build-minutes` (nothing tested).
+- Exit code and `result.json` status: 0 clean or built, 1 findings, 2 harness failure or interrupted, 3 Trio does
+  not build, 4 lane busy, 5 nothing tested (build stopped at `--build-minutes`, or `--until` left no time).
 
 ## Triage a finding
 1. `./tandemkit-stress scan <stderr|.ips|sample file> -v` prints the finding(s) and the frames the fingerprint uses.

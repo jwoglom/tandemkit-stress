@@ -5,8 +5,8 @@ and t:slim X2. It looks for crashes, data races, hangs and failures to recover. 
 under load, with its Bluetooth link broken on purpose. Every finding becomes an issue in this repository.
 
 The one lane built so far is Trio on the iOS Simulator against [faketandem](https://github.com/jwoglom/faketandem),
-the Tandem pump emulator. It runs for six hours every night from 2am Eastern on a self-hosted Mac, and for as long
-as asked (an hour by default) whenever it is started by hand.
+the Tandem pump emulator. It runs twice every night on a self-hosted Mac, from 2am and from 6am Eastern, each for as
+long as the runner's 4-hour job limit allows, and for as long as asked (an hour by default) when started by hand.
 - **Build:** nightscout/Trio `feat/tandem-closed-beta`, with its TandemKit submodule moved to TandemKit `dev`, built
   with the virtual pump and ThreadSanitizer.
 - **Chaos:** seeded pump-side events, link faults, app kills and UI noise. Every round ends with a check that the
@@ -32,7 +32,7 @@ git clone --recurse-submodules https://github.com/jwoglom/tandemkit-stress && cd
 ./tandemkit-stress doctor                           # tools, cache, lane lock, and whether gh can file issues
 
 ./tandemkit-stress run --file-issues                # build, then 1 hour of stress (stress-sim-manual.yml's default)
-./tandemkit-stress run --minutes 360 --file-issues  # build, then 6 hours, like the nightly
+./tandemkit-stress run --minutes 200 --file-issues  # build, then about what each nightly job gets
 ./tandemkit-stress build                            # only the build: warm the cache, or check Trio compiles
 ./tandemkit-stress run --tandemkit jwoglom/TandemKit#470 --seed 42 --minutes 30
 ./tandemkit-stress file-issues runs/<run>           # file a finished run's findings afterwards
@@ -61,10 +61,10 @@ Exit codes:
 |---|---|
 | 0 | Clean, or (`build`) built. |
 | 1 | Findings. |
-| 2 | Harness failure. |
+| 2 | Harness failure, or stopped by a signal (a summary is still written). |
 | 3 | Trio does not build. |
 | 4 | Another stress run on this Mac held the lane. `--wait` queues behind it instead. |
-| 5 | The build stopped at `--build-minutes`, so nothing was stress-tested. The next build continues from DerivedData. |
+| 5 | Nothing was stress-tested: the build stopped at `--build-minutes` (the next build continues from DerivedData), or `--until` left no time for a round. |
 
 What the lane shares and what it keeps to itself:
 - **trio-test-harness.** The lane builds on [trio-test-harness](https://github.com/jwoglom/trio-test-harness), the
@@ -89,7 +89,7 @@ settings work too.
 
 | Workflow | Runs on | What |
 |---|---|---|
-| `stress-sim-nightly.yml` | 02:00 America/New_York every night | A build (up to 120 minutes), then 6 hours of stress. |
+| `stress-sim-nightly.yml` | 02:00 and 06:00 America/New_York every night | A build (up to 120 minutes), then stress until 20 minutes before the runner's 4-hour limit. |
 | `stress-sim-manual.yml` | by hand (`workflow_dispatch`) | A build (`build_minutes`, 120 by default), then `minutes` of stress (60 by default), with inputs for the TandemKit ref, seed, intensity and chaos mix. |
 | `stress-sim-job.yml` | called by the two above | The job itself, on `[self-hosted, macOS, worker]`: a Build step, then a Stress step if the build finished. Files issues for findings and build breaks. |
 | `tests.yml` | `ubuntu-latest`, every push and PR | Unit tests, including one against a live faketandem. |
@@ -108,7 +108,9 @@ One-time setup:
 4. **The submodule pin.** It points at the trio-test-harness commit that adds the build options this lane uses
    (`conditions`, `sanitizer`, `save`, `timeout`). Once that branch is merged, move the pin to the merged commit.
 
-`minutes` is the stress alone: the build and simulator setup come before it. The first build is cold and long with
+`minutes` is the stress alone: the build and simulator setup come before it. The runners stop a job 4 hours after
+it starts and anything not yet uploaded is lost, so the job ends its stress 20 minutes before that (`--until`), and
+holds the build to what fits. The first build is cold and long with
 TSan; if it reaches the build limit, the job fails (nothing was tested) and the next run continues the build. A
 job is green only when the stress ran and found nothing. The
 build cache persists, so later runs rebuild little more than TandemKit. A job that finds the lane held by a run started by hand on that Mac fails with "lane busy".

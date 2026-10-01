@@ -17,7 +17,7 @@ on:
         type: string
         default: "nightscout/Trio:feat/tandem-closed-beta"
       minutes:
-        description: "Minutes of stress, after the build and simulator setup"
+        description: "Minutes of stress, after the build and simulator setup (the runners stop a job at 4 hours, so at most about 3 hours)"
         type: number
         default: 60
       build_minutes:
@@ -66,41 +66,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # The job's limit is build_minutes + minutes + 45 (checkout, setup, the last check, issues, artifacts), and expressions
-  # cannot add. The 24-hour ceiling is GITHUB_TOKEN's lifetime, which the job needs at the end to file issues.
-  plan:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      minutes: ${{ steps.plan.outputs.minutes }}
-      build_minutes: ${{ steps.plan.outputs.build_minutes }}
-      timeout: ${{ steps.plan.outputs.timeout }}
-    steps:
-      - id: plan
-        env:
-          IN_MINUTES: ${{ inputs.minutes }}
-          IN_BUILD_MINUTES: ${{ inputs.build_minutes }}
-        run: |
-          for v in "$IN_MINUTES" "$IN_BUILD_MINUTES"; do
-            if ! [[ "$v" =~ ^[0-9]+$ ]] || (( 10#$v < 1 )); then
-              echo "::error title=minutes::minutes and build_minutes must be whole numbers, at least 1"
-              exit 1
-            fi
-          done
-          minutes=$(( 10#$IN_MINUTES )) build=$(( 10#$IN_BUILD_MINUTES ))
-          if (( minutes + build + 45 > 1440 )); then
-            echo "::error title=minutes::minutes + build_minutes must be at most 1395 (the job, 45 minutes longer, must end within 24 hours)"
-            exit 1
-          fi
-          { echo "minutes=$minutes"; echo "build_minutes=$build"; echo "timeout=$(( minutes + build + 45 ))"; } >> "$GITHUB_OUTPUT"
-
   stress:
-    needs: plan
     uses: ./.github/workflows/stress-sim-job.yml
     with:
-      minutes: ${{ fromJSON(needs.plan.outputs.minutes) }}
-      build_minutes: ${{ fromJSON(needs.plan.outputs.build_minutes) }}
-      timeout_minutes: ${{ fromJSON(needs.plan.outputs.timeout) }}
+      # A workflow_dispatch number input arrives as a string; the job's inputs are numbers.
+      minutes: ${{ fromJSON(inputs.minutes) }}
+      build_minutes: ${{ fromJSON(inputs.build_minutes) }}
       tandemkit: ${{ inputs.tandemkit }}
       trio: ${{ inputs.trio }}
       seed: ${{ inputs.seed }}

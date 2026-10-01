@@ -1,11 +1,11 @@
 """`tandemkit-stress build` and `tandemkit-stress run`: Trio on the iOS Simulator against faketandem, with chaos.
 
     ./tandemkit-stress run                          # build closed-beta Trio + TandemKit dev, then 60 min of stress
-    ./tandemkit-stress run --minutes 360            # what the nightly job runs
+    ./tandemkit-stress run --minutes 200            # about what each nightly job gets
     ./tandemkit-stress run --minutes 20 --seed 42 --intensity high
     ./tandemkit-stress run --tandemkit jwoglom/TandemKit#470   # a TandemKit PR instead of dev
     ./tandemkit-stress run --app build/…/Trio.app   # skip checkout and build (an app built with the virtual pump)
-    ./tandemkit-stress run --minutes 360 --file-issues   # by hand on a Mac, filing issues through the local `gh` login
+    ./tandemkit-stress run --minutes 200 --file-issues   # by hand on a Mac, filing issues through the local `gh` login
     ./tandemkit-stress build                        # only the build, into a new run directory (CI's first step)
     ./tandemkit-stress run --build runs/<run>       # stress the build that run directory holds (CI's second step)
 
@@ -23,9 +23,10 @@ build nor the simulator setup nor collection counts against it.
   4. collection: sanitizer and Main Thread Checker reports from every launch's stderr, crash reports, TandemKit's
      OSLog stream and log file, faketandem's request log; findings.json, summary.md, result.json
 
-Exit codes: 0 clean (`build`: built), 1 findings, 2 harness/setup failure, 3 Trio does not build against that
-TandemKit, 4 another stress run on this machine holds the lane (tkstress/lock.py; --wait queues), 5 the build stopped
-at --build-minutes, so nothing was stress-tested (the next build continues from DerivedData).
+Exit codes: 0 clean (`build`: built), 1 findings, 2 harness/setup failure (or stopped by a signal), 3 Trio does not
+build against that TandemKit, 4 another stress run on this machine holds the lane (tkstress/lock.py; --wait queues),
+5 nothing was stress-tested: the build stopped at --build-minutes (the next build continues from DerivedData), or
+--until left no time for a round.
 """
 from __future__ import annotations
 
@@ -36,6 +37,7 @@ import plistlib
 import random
 import re
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -67,6 +69,12 @@ def new_run(name: str, meta: dict):
     write_json(run.meta_path, {"name": name, "created": dt.datetime.now().isoformat(timespec="seconds"),
                                "status": "running", **meta})
     return run
+
+
+def stress_window(started: float, minutes: float, until: float | None) -> tuple[float, bool]:
+    """When the rounds end: --minutes after the first, or --until if that is sooner (True when it is)."""
+    end = started + minutes * 60
+    return (until, True) if until is not None and until < end else (end, False)
 
 
 def open_run(path: Path):
@@ -116,6 +124,7 @@ class Lane:
         self.stress = hasattr(args, "minutes")
         self.deadline: float | None = None          # set when the first round starts
         self.stress_started: float | None = None
+        self.cut_short = False
         seed = getattr(args, "seed", None)
         self.seed = seed if seed is not None else random.randrange(1, 2**31)
         self.fk = None
@@ -445,9 +454,11 @@ class Lane:
                             + ([f"Xcode {build['xcode']}"] if build.get("xcode") else []))]
         if self.stress:
             stress_min = (time.time() - self.stress_started) / 60 if self.stress_started else 0
-            lines.append(f"seed `{self.seed}` · intensity `{self.args.intensity}` · {len(self.rounds)} rounds in "
-                         f"{stress_min:.0f} of {self.args.minutes:g} min · {applied} actions applied ({skipped} skipped, "
-                         f"{errors} errors) · {len(self.app.launches) if self.app else 0} app launches")
+            window = (f"{stress_min:.0f} min (cut from {self.args.minutes:g} by --until, the job's time limit)"
+                      if self.cut_short else f"{stress_min:.0f} of {self.args.minutes:g} min")
+            lines.append(f"seed `{self.seed}` · intensity `{self.args.intensity}` · {len(self.rounds)} rounds in {window} · "
+                         f"{applied} actions applied ({skipped} skipped, {errors} errors) · "
+                         f"{len(self.app.launches) if self.app else 0} app launches")
         lines.append("")
         if self.note:
             lines += [self.note, ""]
@@ -499,7 +510,10 @@ class Lane:
             raise _Stop("no-initial-session", "TandemKit never connected; no rounds run", EXIT_FINDINGS)
         self.run.log_step("connected", "TandemKit authenticated with faketandem")
         self.stress_started = time.time()
-        self.deadline = self.stress_started + a.minutes * 60
+        self.deadline, self.cut_short = stress_window(self.stress_started, a.minutes, a.until)
+        if self.cut_short and self.left() < MIN_ROUND_S:
+            raise _Stop("no-time", "--until (the job's time limit) left no time for a round after setup: nothing was "
+                                   "stress-tested.", EXIT_INCOMPLETE)
         self.rounds_loop()
 
     def execute(self) -> int:
@@ -529,6 +543,9 @@ class Lane:
                     self.status = "completed" if self.stress else "built"
                 except _Stop as s:
                     self.status, self.note, code = s.status, s.note, s.code
+                except KeyboardInterrupt:
+                    self.status, code = "interrupted", EXIT_HARNESS
+                    self.note = "Stopped by a signal (job cancelled, or the runner shutting down) before the run ended."
                 finally:
                     if self.stress:
                         self.collect()
@@ -578,6 +595,7 @@ def _lane_with_issues(args) -> int:
             raise HarnessError("--file-issues: no repository; pass --issues-repo owner/repo or set TKSTRESS_ISSUES_REPO")
         issues.check_gh(repo)
     keep_awake()
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     lane = Lane(args)
     code = lane.execute()
     if repo and code in (EXIT_FINDINGS, EXIT_BUILD):
@@ -622,7 +640,10 @@ def add_run_arguments(p) -> None:
     g = p.add_argument_group("stress")
     g.add_argument("--minutes", type=float, default=60,
                    help="minutes of stress, from the first round: the build, setup and collection are not counted "
-                        "(default 60; the nightly job runs 360)")
+                        "(default 60)")
+    g.add_argument("--until", type=float, metavar="EPOCH",
+                   help="end the stress by this time (epoch seconds) even if --minutes has not run out; CI passes "
+                        "its runner's job limit less the time collection and uploads need")
     g.add_argument("--build", metavar="RUN_DIR", help="stress the build `tandemkit-stress build` made in RUN_DIR, "
                                                        "and add this run's results to that directory")
     g.add_argument("--app", help="a Trio.app already built with TANDEMKIT_VIRTUAL_PUMP: skip checkout and build")

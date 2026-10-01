@@ -400,6 +400,12 @@ class Lane(unittest.TestCase):
             lane.rounds_loop()
         self.assertEqual(spans, [240, 240, 60])
 
+    def test_until_cuts_the_stress_short_only_when_it_is_sooner(self):
+        from tkstress.lane import stress_window
+        self.assertEqual(stress_window(1000, 10, None), (1600, False))
+        self.assertEqual(stress_window(1000, 10, 5000), (1600, False))
+        self.assertEqual(stress_window(1000, 240, 9000), (9000, True))
+
     def test_only_a_webdriveragent_this_checkout_started_counts_as_ours(self):
         from unittest import mock
         from harness import wda as W
