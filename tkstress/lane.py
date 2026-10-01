@@ -23,9 +23,9 @@ build nor the simulator setup nor collection counts against it.
   4. collection: sanitizer and Main Thread Checker reports from every launch's stderr, crash reports, TandemKit's
      OSLog stream and log file, faketandem's request log; findings.json, summary.md, result.json
 
-Exit codes: 0 clean (also a build stopped at --build-minutes, status build-incomplete), 1 findings, 2 harness/setup
-failure, 3 Trio does not build against that TandemKit, 4 another stress run on this machine holds the lane
-(tkstress/lock.py; --wait queues).
+Exit codes: 0 clean (`build`: built), 1 findings, 2 harness/setup failure, 3 Trio does not build against that
+TandemKit, 4 another stress run on this machine holds the lane (tkstress/lock.py; --wait queues), 5 the build stopped
+at --build-minutes, so nothing was stress-tested (the next build continues from DerivedData).
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ from .detect import (Finding, Findings, crash_finding, default_crash_dirs, find_
 
 DEFAULT_TRIO = "nightscout/Trio:feat/tandem-closed-beta"
 DEFAULT_TANDEMKIT = "dev"
-EXIT_CLEAN, EXIT_FINDINGS, EXIT_HARNESS, EXIT_BUILD, EXIT_BUSY = 0, 1, 2, 3, 4
+EXIT_CLEAN, EXIT_FINDINGS, EXIT_HARNESS, EXIT_BUILD, EXIT_BUSY, EXIT_INCOMPLETE = 0, 1, 2, 3, 4, 5
 FAILURE_KINDS = {"crash", "tsan", "asan", "main-thread", "no-recovery", "hang", "app-died"}
 
 MIN_ROUND_S = 60
@@ -151,8 +151,8 @@ class Lane:
                          conditions=("TANDEMKIT_VIRTUAL_PUMP",), sanitizer=None if a.sanitizer == "none" else a.sanitizer,
                          save=False, timeout=a.build_minutes * 60 if a.build_minutes else None)
         except B.BuildTimeout as e:
-            raise _Stop("build-incomplete", f"{e}. Not a failure: the next build continues from DerivedData.",
-                        EXIT_CLEAN) from None
+            raise _Stop("build-incomplete", f"{e}. Nothing was stress-tested; the next build continues from "
+                        "DerivedData.", EXIT_INCOMPLETE) from None
         except HarnessError as e:
             self.findings.add(build_failure(str(e), a.trio, a.tandemkit))
             raise _Stop("build-failed", "Trio did not build against this TandemKit", EXIT_BUILD) from None
@@ -606,8 +606,8 @@ def add_build_arguments(p) -> None:
     g.add_argument("--faketandem-ref", default=None, help="faketandem branch/tag/sha (default FAKETANDEM_REF, main)")
     g.add_argument("--sanitizer", choices=["thread", "address", "none"], default="thread")
     g.add_argument("--build-minutes", type=float,
-                   help="stop xcodebuild after this many minutes (status build-incomplete; the next build continues "
-                        "from DerivedData). Default: no limit")
+                   help="stop xcodebuild after this many minutes (exit 5, status build-incomplete; the next build "
+                        "continues from DerivedData). Default: no limit")
     p.add_argument("--wait", action="store_true",
                    help="wait for another stress run on this machine (by hand or CI) instead of exiting with 4")
     p.add_argument("--file-issues", action="store_true",

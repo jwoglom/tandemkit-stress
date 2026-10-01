@@ -102,6 +102,11 @@ jobs:
           owner: jwoglom
           repositories: trio-test-harness,TandemKit
 
+      - name: Check the App token can read them
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: scripts/check-app-access.sh jwoglom/trio-test-harness jwoglom/TandemKit
+
       - name: Checkout trio-test-harness
         uses: actions/checkout@v4
         with:
@@ -190,22 +195,24 @@ jobs:
           path: ${{ steps.build.outputs.run_dir }}
           retention-days: 14
 
+      # Green only when the stress ran and found nothing: a job that tested nothing fails, whatever the reason.
       - name: Result
         if: always()
         env:
           BUILD: ${{ steps.build.outputs.status }}
           STRESS_RC: ${{ steps.stress.outputs.rc }}
+          BUILD_MINUTES: ${{ inputs.build_minutes }}
         run: |
           case "$BUILD" in
             built) ;;
-            build-incomplete) echo "::notice title=Build incomplete::stopped at build_minutes; the next run continues from DerivedData"; exit 0 ;;
+            build-incomplete) echo "::error title=Not tested: build incomplete::the build did not finish within $BUILD_MINUTES minutes, so nothing was stress-tested. The next run continues it from DerivedData; raise build_minutes for a cold cache."; exit 1 ;;
             build-failed) echo "::error title=Build break::Trio does not build against this TandemKit"; exit 1 ;;
-            busy) echo "::warning title=Not run::another stress run on this runner's Mac held the lane; see the job summary"; exit 0 ;;
+            busy) echo "::error title=Not tested: lane busy::another stress run on this runner's Mac held the lane; see the job summary"; exit 1 ;;
             *) echo "::error title=Harness error::the build step did not complete; see its log"; exit 1 ;;
           esac
           case "${STRESS_RC:-2}" in
             0) echo "clean" ;;
             1) echo "::error title=Stress findings::see the job summary and the issues filed"; exit 1 ;;
-            4) echo "::warning title=Not run::another stress run on this runner's Mac took the lane after the build; see the job summary" ;;
+            4) echo "::error title=Not tested: lane busy::another stress run on this runner's Mac took the lane after the build; see the job summary"; exit 1 ;;
             *) echo "::error title=Harness error::the stress step did not complete; see its log"; exit 1 ;;
           esac

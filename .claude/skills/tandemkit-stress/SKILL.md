@@ -35,8 +35,8 @@ plus `FAKETANDEM_JAR`. `./tandemkit-stress doctor` checks all of this.
   - `logs/tandem_log.txt`.
   - `faketandem.log`.
   - `faketandem-requests.jsonl`: every message the pump saw, with sequence numbers.
-- Exit code and `result.json` status: 0 clean, built or build-incomplete, 1 findings, 2 harness failure, 3 Trio does
-  not build, 4 lane busy.
+- Exit code and `result.json` status: 0 clean or built, 1 findings, 2 harness failure, 3 Trio does not build,
+  4 lane busy, 5 build stopped at `--build-minutes` (nothing tested).
 
 ## Triage a finding
 1. `./tandemkit-stress scan <stderr|.ips|sample file> -v` prints the finding(s) and the frames the fingerprint uses.

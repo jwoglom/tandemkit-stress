@@ -59,11 +59,12 @@ Exit codes:
 
 | Code | Meaning |
 |---|---|
-| 0 | Clean, or (`build`) built. Also a build stopped at `--build-minutes` (status `build-incomplete`), which the next build continues. |
+| 0 | Clean, or (`build`) built. |
 | 1 | Findings. |
 | 2 | Harness failure. |
 | 3 | Trio does not build. |
 | 4 | Another stress run on this Mac held the lane. `--wait` queues behind it instead. |
+| 5 | The build stopped at `--build-minutes`, so nothing was stress-tested. The next build continues from DerivedData. |
 
 What the lane shares and what it keeps to itself:
 - **trio-test-harness.** The lane builds on [trio-test-harness](https://github.com/jwoglom/trio-test-harness), the
@@ -100,15 +101,17 @@ One-time setup:
    needs `/Applications/Xcode_26.2.app`, uv and the iPhone 17 simulator. `/Volumes/work` mirrors and a prebuilt WDA
    are used if present.
 2. **Secrets `TRIO_E2E_APP_ID` and `TRIO_E2E_APP_KEY`.** Use the same GitHub App as trio-test-harness. It needs
-   contents read on trio-test-harness and TandemKit, and both workflows use it to check out the harness.
+   Contents: read on trio-test-harness and TandemKit, and both workflows use it to check out the harness. They
+   check that access first (`scripts/check-app-access.sh`); git alone reports a missing Contents permission as
+   "Repository not found".
 3. **The default branch.** GitHub schedules and dispatches only workflows on the default branch.
 4. **The submodule pin.** It points at the trio-test-harness commit that adds the build options this lane uses
    (`conditions`, `sanitizer`, `save`, `timeout`). Once that branch is merged, move the pin to the merged commit.
 
 `minutes` is the stress alone: the build and simulator setup come before it. The first build is cold and long with
-TSan; if it reaches the build limit, the job ends with a notice, not a failure, and the next run continues it. The
-build cache persists, so later runs rebuild little more than TandemKit. A job that finds the lane held by a run started by hand on that Mac exits with 4. It ends with a warning,
-not a failure.
+TSan; if it reaches the build limit, the job fails (nothing was tested) and the next run continues the build. A
+job is green only when the stress ran and found nothing. The
+build cache persists, so later runs rebuild little more than TandemKit. A job that finds the lane held by a run started by hand on that Mac fails with "lane busy".
 
 ## Issues
 

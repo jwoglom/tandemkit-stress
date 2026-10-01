@@ -353,7 +353,7 @@ class Lane(unittest.TestCase):
                 with self.assertRaises(HarnessError):
                     lane.load_build()
 
-    def test_a_build_stopped_at_its_limit_is_incomplete_not_failed(self):
+    def test_a_build_stopped_at_its_limit_is_incomplete(self):
         from harness import build as B
         from tkstress import lane as L
         from tkstress.cli import build_parser
@@ -364,7 +364,7 @@ class Lane(unittest.TestCase):
                     stack.enter_context(pt)
                 code = L.Lane(build_parser().parse_args(["build", "--build-minutes", "90"])).execute()
                 result = json.loads(next(Path(d).glob("*/result.json")).read_text())
-        self.assertEqual(code, L.EXIT_CLEAN)
+        self.assertEqual(code, L.EXIT_INCOMPLETE)
         self.assertEqual(result["status"], "build-incomplete")
 
     def test_minutes_is_the_stress_alone(self):
