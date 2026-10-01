@@ -4,6 +4,9 @@ An issue carries its finding's fingerprint in a hidden marker. A later run that 
 the open issue (commits, seed, link to the run) instead of opening another; a closed issue whose fingerprint comes
 back gets a new issue that links the old one, since a fix that did not hold is news.
 
+The repository is --repo, else TKSTRESS_ISSUES_REPO, else GITHUB_REPOSITORY in CI, else this checkout's origin: a run
+started by hand files through the local `gh` login into the same place CI does.
+
 Nothing is filed in TandemKit: a person (or Claude, on request) promotes a confirmed driver bug there.
 Bodies are scrubbed of long hex/base64 strings and home-directory paths before they leave the machine; the runs use
 only faketandem and the Glucose Simulator, but the long-term key the lane generates must never be posted.
@@ -17,6 +20,8 @@ from pathlib import Path
 
 from harness.util import HarnessError, log, run
 
+from . import REPO_ROOT, setting
+
 MARKER = "<!-- stress-fingerprint: {fp} -->"
 LABELS = {"stress": ("5319e7", "Found by tandemkit-stress (simulator + faketandem)")}
 KIND_COLOR = "fbca04"
@@ -29,6 +34,34 @@ def scrub(text: str) -> str:
     if home and home != "/":
         text = text.replace(home, "~")
     return text
+
+
+def repo_from_remote(url: str) -> str | None:
+    """owner/repo from a GitHub remote URL (https or ssh), else None."""
+    m = re.match(r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?/?$",
+                 url.strip())
+    return m.group(1) if m else None
+
+
+def issues_repo() -> str | None:
+    if setting("TKSTRESS_ISSUES_REPO"):
+        return setting("TKSTRESS_ISSUES_REPO")
+    if os.environ.get("GITHUB_REPOSITORY"):
+        return os.environ["GITHUB_REPOSITORY"]
+    cp = run(["git", "-C", str(REPO_ROOT), "remote", "get-url", "origin"], check=False, quiet=True)
+    return repo_from_remote(cp.stdout or "") if cp.returncode == 0 else None
+
+
+def check_gh(repo: str) -> None:
+    """Fail now, not after hours of running, when `gh` cannot file into `repo`."""
+    try:
+        cp = _gh(["repo", "view", repo, "--json", "hasIssuesEnabled"], check=False)
+    except OSError:
+        raise HarnessError("gh is not installed (brew install gh), and --file-issues needs it") from None
+    if cp.returncode != 0:
+        raise HarnessError(f"gh cannot read {repo} (gh auth login?): {(cp.stderr or cp.stdout or '').strip()[:300]}")
+    if not json.loads(cp.stdout or "{}").get("hasIssuesEnabled", True):
+        raise HarnessError(f"{repo} has issues turned off")
 
 
 def _gh(args: list[str], **kw):
@@ -56,6 +89,11 @@ def run_url() -> str | None:
     return None
 
 
+def run_line(run_dir: Path) -> str:
+    link = run_url()
+    return f"Run: {link}" if link else f"Run: started by hand; `runs/{run_dir.name}` on the Mac that ran it (not uploaded)"
+
+
 def environment_lines(meta: dict) -> list[str]:
     args = meta.get("args") or {}
     git = meta.get("git") or {}
@@ -72,7 +110,6 @@ def environment_lines(meta: dict) -> list[str]:
 def issue_body(f: dict, meta: dict, run_dir: Path) -> str:
     args = meta.get("args") or {}
     subs = (meta.get("git") or {}).get("submodules") or {}
-    link = run_url()
     lines = [MARKER.format(fp=f["fp"]), "",
              f"**{f['kind']}** in **{f['component']}**, seen {f['occurrences']}× in one run"
              + (f" (round {f['round']})" if f.get("round") else "") + ".", "",
@@ -80,25 +117,21 @@ def issue_body(f: dict, meta: dict, run_dir: Path) -> str:
              "### Report", "", "<details><summary>excerpt</summary>", "", "```", f["details"][:5000], "```", "",
              "</details>", "", "### Environment", "", *environment_lines(meta), ""]
     if f.get("evidence"):
-        lines += ["### Evidence (in the run artifact)", "", *[f"- `{e}`" for e in f["evidence"]], ""]
+        lines += ["### Evidence (in the run directory)", "", *[f"- `{e}`" for e in f["evidence"]], ""]
     lines += ["### Reproduce", "", "```",
               f"./tandemkit-stress run --trio {args.get('trio')} --tandemkit "
               f"{subs.get('TandemKit') or args.get('tandemkit')} --seed {meta.get('seed')} --intensity "
               f"{args.get('intensity')}", "```",
               "The seed fixes the plan of actions, not thread timing: a race may take several runs to reappear.", ""]
-    if link:
-        lines += [f"Run: {link}", ""]
+    lines += [run_line(run_dir), ""]
     lines += ["Simulated devices only (faketandem, Glucose Simulator); no real pump or health data.", "",
               "---", "_Filed by `tandemkit-stress file-issues`_"]
     return scrub("\n".join(lines))
 
 
-def comment_body(f: dict, meta: dict) -> str:
-    link = run_url()
+def comment_body(f: dict, meta: dict, run_dir: Path) -> str:
     lines = [f"Seen again: {f['occurrences']}× in one run" + (f" (round {f['round']})" if f.get("round") else "") + ".",
-             "", *environment_lines(meta)]
-    if link:
-        lines += ["", f"Run: {link}"]
+             "", *environment_lines(meta), "", run_line(run_dir)]
     lines += ["", "---", "_Filed by `tandemkit-stress file-issues`_"]
     return scrub("\n".join(lines))
 
@@ -122,7 +155,7 @@ def file_issues(run_dir: Path, repo: str, *, dry_run: bool = False, kinds: set[s
             continue
         existing = find_issue(repo, f["fp"])
         if existing and existing["state"] == "OPEN":
-            _gh(["issue", "comment", str(existing["number"]), "--repo", repo, "--body", comment_body(f, meta)])
+            _gh(["issue", "comment", str(existing["number"]), "--repo", repo, "--body", comment_body(f, meta, run_dir)])
             out.append({"fp": f["fp"], "action": "commented", "url": existing["url"]})
             continue
         body = issue_body(f, meta, run_dir)
@@ -137,9 +170,9 @@ def file_issues(run_dir: Path, repo: str, *, dry_run: bool = False, kinds: set[s
 
 
 def cmd_file_issues(args) -> int:
-    repo = args.repo or os.environ.get("GITHUB_REPOSITORY")
+    repo = args.repo or issues_repo()
     if not repo and not args.dry_run:
-        raise HarnessError("no repository: pass --repo owner/repo (CI sets GITHUB_REPOSITORY)")
+        raise HarnessError("no repository: pass --repo owner/repo or set TKSTRESS_ISSUES_REPO")
     kinds = set(args.kinds.split(",")) if args.kinds else None
     file_issues(Path(args.run_dir).expanduser().resolve(), repo or "", dry_run=args.dry_run, kinds=kinds)
     return 0

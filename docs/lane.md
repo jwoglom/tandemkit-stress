@@ -10,18 +10,25 @@ noise, each round ending in a check that the driver came back. Only simulated de
 ```
 ./tandemkit-stress run                                     # closed-beta Trio + TandemKit dev, 60 min budget
 ./tandemkit-stress run --minutes 360                       # the nightly job's length
+./tandemkit-stress run --minutes 360 --file-issues         # the same by hand, filing through your `gh` login
 ./tandemkit-stress run --minutes 25 --seed 42 --intensity high
 ./tandemkit-stress run --tandemkit jwoglom/TandemKit#470   # a TandemKit PR
 ./tandemkit-stress run --app <Trio.app> --minutes 15       # reuse a virtual-pump build, skip checkout + build
-./tandemkit-stress file-issues runs/<run>                  # one GitHub issue per new finding (CI does this)
+./tandemkit-stress file-issues runs/<run>                  # one GitHub issue per new finding
 ./tandemkit-stress scan app/launch-03.stderr crashes/*.ips # triage: the findings in sanitizer output / crash reports
 ./tandemkit-stress faketandem --paired                     # the emulator alone, for poking at it by hand
 ```
 
 The lane builds on [trio-test-harness](https://github.com/jwoglom/trio-test-harness) (the `trio-test-harness/`
 submodule, or `TKSTRESS_HARNESS_DIR`): its source checkout and `xcodebuild`, simulator driver, WebDriverAgent and
-Trio UI flows. It keeps its own Trio checkout, DerivedData, build and run directories (see `tkstress/__init__.py`), so
-a stress build never invalidates the harness's normal one.
+Trio UI flows. It keeps its own Trio checkout, DerivedData and build directory, so a stress build never invalidates
+the harness's normal one. These live in a cache shared by every stress run on the machine, started by hand or from
+CI (`tkstress/__init__.py`). A lock in it (`tkstress/lock.py`) lets one run at a time use the cache and the lane's
+simulator. A run that finds the lane held exits with 4 and names the holder; with `--wait`, it queues until its
+deadline.
+- **Issues from a hand-started run.** `--file-issues` files them at the end through the local `gh` login. `gh`'s
+  access to the repository is checked before the run starts.
+- **Sleep.** The run holds a `caffeinate` assertion against idle sleep.
 
 ## How a run goes
 
@@ -47,6 +54,7 @@ Exit codes:
 | 1 | Findings. |
 | 2 | Harness or setup failure. |
 | 3 | Trio does not build against that TandemKit. |
+| 4 | Not run: another stress run on this machine held the lane. |
 
 Each run leaves `summary.md`, `result.json` and `findings.json` in `runs/<ts>-stress-<ref>/`.
 
@@ -99,9 +107,11 @@ workflow with no trigger of its own; both of them call it.
 - **One at a time.** Both workflows share the `stress-sim` concurrency group: a manual run started during the
   nightly waits for it, and the other way round. GitHub keeps only one waiting run per group, so a second manual
   run started while one waits replaces it.
-- **Persistent cache.** `TRIO_REPO`, `TH_DERIVED_DATA` and `TH_BUILD_DIR` live in a cache that survives between
-  jobs: `/Volumes/work/cache/tandemkit-stress` if writable, else `~/Library/Caches/tandemkit-stress`. A warm build is
-  incremental (usually only TandemKit changed). A cold one with TSan can use up a manual run's hour, and is
+- **Runs started by hand.** The concurrency group does not cover a run started by hand on the runner's Mac; the
+  lane lock does. A job that finds the lane held exits with 4, which the workflow reports as a warning.
+- **Persistent cache.** `TRIO_REPO`, `TH_DERIVED_DATA` and `TH_BUILD_DIR` live in the lane's cache, which survives
+  between jobs: `/Volumes/work/cache/tandemkit-stress` where that volume is writable, else
+  `~/Library/Caches/tandemkit-stress`. A warm build is incremental (usually only TandemKit changed). A cold one with TSan can use up a manual run's hour, and is
   reported as `build-incomplete` or `built-only` when it does; the next run starts warm.
 - **Checkouts and tokens.** This repository is checked out with the job's own token. trio-test-harness is checked
   out at the commit the submodule pins (or `harness_ref`), and Trio's TandemKit submodule is fetched, with a GitHub

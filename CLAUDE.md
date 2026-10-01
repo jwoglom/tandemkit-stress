@@ -9,7 +9,7 @@ Conventions:
 - Everything goes through `./tandemkit-stress` (`tkstress/cli.py`).
 - trio-test-harness is a library here (the submodule, or `TKSTRESS_HARNESS_DIR`). When the lane needs something
   from the build, simulator or UI flows, add it to trio-test-harness and bump the pin; don't copy harness code in.
-  Never commit or push in the harness's Trio checkout (`work/Trio`, or the CI cache).
+  Never commit or push in the lane's Trio checkout (`<cache>/Trio`; `./tandemkit-stress doctor` prints the cache).
 - Harness `Config` reads only the environment variables it has defaults for. Read tandemkit-stress's own settings
   with `tkstress.setting()`.
 - Tests:

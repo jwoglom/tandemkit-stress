@@ -5,6 +5,7 @@
     ./tandemkit-stress run --minutes 20 --seed 42 --intensity high
     ./tandemkit-stress run --tandemkit jwoglom/TandemKit#470   # a TandemKit PR instead of dev
     ./tandemkit-stress run --app build/…/Trio.app   # skip checkout and build (an app built with the virtual pump)
+    ./tandemkit-stress run --minutes 360 --file-issues   # by hand on a Mac, filing issues through the local `gh` login
 
 Stages, each bounded by the deadline:
   1. faketandem fetched and built (tkstress/faketandem.py): first, while any CI token is still fresh
@@ -19,7 +20,7 @@ Stages, each bounded by the deadline:
      OSLog stream and log file, faketandem's request log; findings.json, summary.md, result.json
 
 Exit codes: 0 clean (or built but no time left to run), 1 findings, 2 harness/setup failure, 3 Trio does not build
-against that TandemKit.
+against that TandemKit, 4 another stress run on this machine holds the lane (tkstress/lock.py; --wait queues).
 """
 from __future__ import annotations
 
@@ -30,17 +31,19 @@ import plistlib
 import random
 import re
 import shutil
+import subprocess
 import time
 from pathlib import Path
 
 from harness.util import HarnessError, log
-from . import HARNESS_DIR
+from . import CACHE_DIR, HARNESS_DIR
+from .lock import LaneBusy, holder_description
 from .detect import (Finding, Findings, crash_finding, default_crash_dirs, find_crash_reports, parse_ips,
                      sample_finding, scan_stderr)
 
 DEFAULT_TRIO = "nightscout/Trio:feat/tandem-closed-beta"
 DEFAULT_TANDEMKIT = "dev"
-EXIT_CLEAN, EXIT_FINDINGS, EXIT_HARNESS, EXIT_BUILD = 0, 1, 2, 3
+EXIT_CLEAN, EXIT_FINDINGS, EXIT_HARNESS, EXIT_BUILD, EXIT_BUSY = 0, 1, 2, 3, 4
 FAILURE_KINDS = {"crash", "tsan", "asan", "main-thread", "no-recovery", "hang", "app-died"}
 
 SETUP_RESERVE_S = 8 * 60        # simulator boot, install, launch, WDA, CGM
@@ -424,17 +427,19 @@ class Lane:
     # ---------------- driver -----------------
 
     def execute(self) -> int:
-        from harness import busy
+        from . import lock
         a = self.args
         self.run = new_run("stress-" + re.sub(r"[^\w.-]+", "-", f"{a.tandemkit}"),
                            {"kind": "stress", "title": f"TandemKit stress: Trio {a.trio} + TandemKit {a.tandemkit}",
                             "seed": self.seed, "deadline": dt.datetime.fromtimestamp(self.deadline).isoformat(
                                 timespec="seconds"), "args": {k: v for k, v in vars(a).items() if k != "fn"}})
         self.findings = Findings(self.run.path / "findings.json")
-        log(f"stress run {self.run.path} (seed {self.seed}, {self.left() / 60:.0f} min budget)")
+        log(f"stress run {self.run.path} (seed {self.seed}, {self.left() / 60:.0f} min budget, cache {CACHE_DIR})")
         code = EXIT_CLEAN
+        minimum = SETUP_RESERVE_S + MIN_ROUND_S + CHECK_RESERVE_S + COLLECT_RESERVE_S
         try:
-            with busy.hold("sim", f"tandemkit-stress (seed {self.seed})", wait=a.wait):
+            with lock.hold(CACHE_DIR / "lane.lock", f"{holder_description()} (seed {self.seed})", wait=a.wait,
+                           give_up=lambda: self.left() < minimum):
                 try:
                     self.prepare_faketandem()
                     app, bundle_id = self.checkout_and_build()
@@ -461,6 +466,9 @@ class Lane:
                     self.status, self.note, code = s.status, s.note, s.code
                 finally:
                     self.collect()
+        except LaneBusy as e:
+            self.status, self.note, code = "busy", f"Not run: {e}.", EXIT_BUSY
+            log(str(e))
         except HarnessError as e:
             self.status, self.note, code = "harness-error", f"{type(e).__name__}: {e}", EXIT_HARNESS
             log(f"stress run failed in the harness: {e}")
@@ -487,8 +495,30 @@ class _Stop(Exception):
         self.status, self.note, self.code = status, note, code
 
 
+def keep_awake() -> None:
+    """A Mac left alone would otherwise idle-sleep partway through a long run."""
+    if shutil.which("caffeinate"):
+        subprocess.Popen(["caffeinate", "-i", "-s", "-w", str(os.getpid())],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def cmd_run(args) -> int:
-    return Lane(args).execute()
+    from . import issues
+    repo = None
+    if args.file_issues:
+        repo = args.issues_repo or issues.issues_repo()
+        if not repo:
+            raise HarnessError("--file-issues: no repository; pass --issues-repo owner/repo or set TKSTRESS_ISSUES_REPO")
+        issues.check_gh(repo)
+    keep_awake()
+    lane = Lane(args)
+    code = lane.execute()
+    if repo and code in (EXIT_FINDINGS, EXIT_BUILD):
+        try:
+            issues.file_issues(lane.run.path, repo)
+        except HarnessError as e:
+            log(f"filing issues failed: {e}\nretry with: ./tandemkit-stress file-issues {lane.run.path} --repo {repo}")
+    return code
 
 
 def add_run_arguments(p) -> None:
@@ -514,5 +544,10 @@ def add_run_arguments(p) -> None:
     p.add_argument("--session-timeout", type=float, default=120, help="seconds to wait for a re-authenticated session")
     p.add_argument("--probe-timeout", type=float, default=60, help="seconds to wait for the probe's request")
     p.add_argument("--hang-seconds", type=float, default=45, help="an accessibility query slower than this is a hang")
-    p.add_argument("--wait", action="store_true", help="wait for the simulator while another run holds it")
+    p.add_argument("--wait", action="store_true",
+                   help="wait for another stress run on this machine (by hand or CI) instead of exiting with 4")
+    p.add_argument("--file-issues", action="store_true",
+                   help="file findings and build breaks as issues through `gh` (checked before the run starts)")
+    p.add_argument("--issues-repo", help="owner/repo for --file-issues (default TKSTRESS_ISSUES_REPO, else this "
+                                         "checkout's origin)")
     p.add_argument("--result-json", help="also write result.json here")

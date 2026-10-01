@@ -16,36 +16,72 @@ Only simulated devices are involved: faketandem and Trio's Glucose Simulator. No
 [docs/lane.md](docs/lane.md) covers how a run works and what counts as a finding. [docs/roadmap.md](docs/roadmap.md)
 lists the lanes still to build: decoder fuzzing, the driver on Linux, Loop, and the real Mobi.
 
-## Running it
+## Running it on a Mac
 
-macOS with Xcode for `run`. Also Go and Java 17, which build faketandem and run pumpX2's cliparser. Python 3.12+
-(uv is used if installed).
+No GitHub Actions involved: the same run as the workflows, from a terminal. Issues are filed with your own `gh` login.
+
+Needs:
+- macOS with Xcode
+- Go and Java 17, which build faketandem and run pumpX2's cliparser
+- Python 3.12+ (uv is used if installed)
+- `gh`, logged in (`gh auth login`), for `--file-issues`
 
 ```
 git clone --recurse-submodules https://github.com/jwoglom/tandemkit-stress && cd tandemkit-stress
-./setup.sh                                   # venv with this repo's and trio-test-harness's requirements
-./tandemkit-stress doctor
-./tandemkit-stress run --minutes 30          # closed-beta Trio + TandemKit dev, TSan, cycling intensity
-./tandemkit-stress run --tandemkit jwoglom/TandemKit#470 --seed 42
+./setup.sh                                          # venv with this repo's and trio-test-harness's requirements
+./tandemkit-stress doctor                           # tools, cache, lane lock, and whether gh can file issues
+
+./tandemkit-stress run --file-issues                # 1 hour, like stress-sim-manual.yml
+./tandemkit-stress run --minutes 360 --file-issues  # 6 hours, like the nightly
+./tandemkit-stress run --tandemkit jwoglom/TandemKit#470 --seed 42 --minutes 30
+./tandemkit-stress file-issues runs/<run>           # file a finished run's findings afterwards
 ./tandemkit-stress --help
 ```
+
+How a run behaves:
+- **Issues.** `--file-issues` checks before the run starts that `gh` can reach the issues repository, so a long run
+  never ends unable to file. The repository is this checkout's `origin` (jwoglom/tandemkit-stress), or
+  `--issues-repo` / `TKSTRESS_ISSUES_REPO`. Issues filed from a Mac name the run directory instead of an Actions run.
+- **Sleep.** The run holds a `caffeinate` assertion, so an idle Mac does not sleep partway through. That does not
+  cover a closed laptop on battery.
+- **Background.** For a long run, use `tmux` or `nohup ./tandemkit-stress run … &` so closing the terminal does not
+  end it.
+- **Updates.** Pull the lane itself with `git pull --recurse-submodules`. TandemKit and Trio are fetched fresh on
+  every run.
 
 A run leaves `runs/<ts>-stress-<ref>/`:
 - `summary.md`, `findings.json`, `actions.jsonl`
 - the app's stderr per launch, crash reports and hang samples
 - TandemKit's OSLog and faketandem's log and request log
 
-Exit codes: 0 clean (or built with no time left to run), 1 findings, 2 harness failure, 3 Trio does not build.
+Exit codes:
 
-The lane builds on [trio-test-harness](https://github.com/jwoglom/trio-test-harness), the `trio-test-harness/`
-submodule, using its source checkout, xcodebuild, simulator driver, WebDriverAgent and Trio UI flows. To use a
-checkout you already have, set `TKSTRESS_HARNESS_DIR`. The lane also keeps its own state, so it never disturbs the
-harness's normal runs:
-- its own Trio checkout (`work/Trio`), DerivedData, `build/` and `runs/`
-- its own simulator, `TandemKitStress`
+| Code | Meaning |
+|---|---|
+| 0 | Clean, or built with no time left to run. |
+| 1 | Findings. |
+| 2 | Harness failure. |
+| 3 | Trio does not build. |
+| 4 | Another stress run on this Mac held the lane. `--wait` queues behind it instead. |
+
+What the lane shares and what it keeps to itself:
+- **trio-test-harness.** The lane builds on [trio-test-harness](https://github.com/jwoglom/trio-test-harness), the
+  `trio-test-harness/` submodule: its source checkout, xcodebuild, simulator driver, WebDriverAgent and Trio UI
+  flows. To use a checkout you already have, set `TKSTRESS_HARNESS_DIR`.
+- **Its own state.** Neither a trio-test-harness run nor a CI job on the same Mac is disturbed:
+  - its own simulator, `TandemKitStress`
+  - its own Trio checkout, DerivedData and build directory, in a cache shared by every stress run on the machine,
+    by hand or from CI, so the build stays warm. The cache is `/Volumes/work/cache/tandemkit-stress` where the CI
+    Macs have that volume, else `~/Library/Caches/tandemkit-stress`, or `TKSTRESS_CACHE`.
+- **One run at a time.** A lock in that cache allows one stress run on the Mac at once. A run started by hand while
+  the nightly job runs on the same Mac exits with 4 and names the holder, and the other way round.
+- **WebDriverAgent.** It always listens on port 8100. If one is running from another harness checkout, this lane
+  runs without UI actions. A trio-test-harness run started while this lane's WebDriverAgent is up would drive this
+  lane's simulator, so don't run both at once, or pass `--no-ui` here.
 
 Machine settings go in `stress.env` (gitignored), as `KEY=value` lines. Examples: `TH_XCODE_APP`, `TH_SIM_DEVICE`,
-or `FAKETANDEM_BIN` + `FAKETANDEM_JAR` to skip building faketandem. The harness's own `TH_*` settings work too.
+`TKSTRESS_ISSUES_REPO`, or `FAKETANDEM_BIN` + `FAKETANDEM_JAR` to skip building faketandem. The harness's own `TH_*`
+settings work too.
 
 ## CI
 
@@ -59,13 +95,9 @@ or `FAKETANDEM_BIN` + `FAKETANDEM_JAR` to skip building faketandem. The harness'
 One-time setup:
 1. **A runner on this repository.** jwoglom is a personal account, so a runner serves one repository. On a Mac,
    add one under Settings ▸ Actions ▸ Runners with the label `worker`. A Mac that already has a trio-test-harness
-   runner can take a second one.
-   - Neither job can uninstall the other's Trio: this lane uses its own simulator.
-   - A WebDriverAgent the other job started (it always takes port 8100) turns this lane's UI actions off, not
-     its run.
-   - Both jobs at once will still be slow.
-   - The Mac needs `/Applications/Xcode_26.2.app`, uv and the iPhone 17 simulator. `/Volumes/work` mirrors and a
-     prebuilt WDA are used if present.
+   runner can take a second one; see the WebDriverAgent note above, and expect both jobs at once to be slow. The Mac
+   needs `/Applications/Xcode_26.2.app`, uv and the iPhone 17 simulator. `/Volumes/work` mirrors and a prebuilt WDA
+   are used if present.
 2. **Secrets `TRIO_E2E_APP_ID` and `TRIO_E2E_APP_KEY`.** Use the same GitHub App as trio-test-harness. It needs
    contents read on trio-test-harness and TandemKit, and both workflows use it to check out the harness.
 3. **The default branch.** GitHub schedules and dispatches only workflows on the default branch.
@@ -73,9 +105,9 @@ One-time setup:
    (`conditions`, `sanitizer`, `save`, `timeout`). Once that branch is merged, move the pin to the merged commit.
 
 The first build is cold and long with TSan, so a manual run may spend its whole hour on it: it is reported as
-`build-incomplete` or `built-only`, not a failure. The checkout and DerivedData persist in
-`/Volumes/work/cache/tandemkit-stress` (or `~/Library/Caches/tandemkit-stress`), so later nights rebuild little
-more than TandemKit.
+`build-incomplete` or `built-only`, not a failure. The build cache persists, so later runs rebuild little more than
+TandemKit. A job that finds the lane held by a run started by hand on that Mac exits with 4. It ends with a warning,
+not a failure.
 
 ## Issues
 
@@ -83,7 +115,8 @@ more than TandemKit.
 - **Repeats:** a repeat comments on the open issue with the commit and seed. A failure whose issue was closed gets a
   new issue linking the old one.
 - **Labels:** `stress` and `stress:<kind>`.
-- **Scrubbing:** bodies are scrubbed of keys and home paths. The full logs stay in the run's artifact.
+- **Scrubbing:** bodies are scrubbed of keys and home paths. The full logs stay in the run's artifact, or
+  in the run directory on the Mac for a run started by hand.
 - **TandemKit:** nothing is filed there automatically. A confirmed driver bug gets a TandemKit issue or fix PR that
   links back here.
 
@@ -98,4 +131,5 @@ more than TandemKit.
 | `tkstress/app.py` | the app on the simulator: launch with env, stderr capture, OSLog, samples, metrics |
 | `tkstress/detect.py` | sanitizer, Main Thread Checker, crash report and hang parsing; fingerprints |
 | `tkstress/issues.py` | issue filing |
+| `tkstress/lock.py` | one stress run per machine (per build cache) |
 | `tests/` | unit tests and report fixtures |

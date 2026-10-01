@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import plistlib
@@ -236,6 +238,19 @@ class Issues(unittest.TestCase):
         self.assertIn(I.MARKER.format(fp=f.fp), body)
         self.assertIn("--tandemkit def --seed 5", body)
 
+    def test_repository_from_a_github_remote(self):
+        for url in ("https://github.com/jwoglom/tandemkit-stress.git", "https://github.com/jwoglom/tandemkit-stress",
+                    "git@github.com:jwoglom/tandemkit-stress.git", "ssh://git@github.com/jwoglom/tandemkit-stress.git"):
+            self.assertEqual(I.repo_from_remote(url + "\n"), "jwoglom/tandemkit-stress")
+        self.assertIsNone(I.repo_from_remote("https://gitlab.com/jwoglom/tandemkit-stress.git"))
+
+    def test_a_run_started_by_hand_names_its_run_directory(self):
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"GITHUB_RUN_ID": ""}):
+            line = I.run_line(Path("/somewhere/runs/20261001-020000-stress-dev"))
+        self.assertIn("`runs/20261001-020000-stress-dev`", line)
+        self.assertNotIn("/somewhere", line)
+
     def test_build_failure_fingerprint_ignores_paths_and_lines(self):
         from tkstress.lane import build_failure
         a = build_failure("/Users/a/Trio/TandemKit/X.swift:10:5: error: cannot find 'foo' in scope", "t", "dev")
@@ -243,7 +258,47 @@ class Issues(unittest.TestCase):
         self.assertEqual(a.fp, b.fp)
 
 
+class Lock(unittest.TestCase):
+    def test_a_second_run_is_refused_and_told_who_holds_the_lane(self):
+        from tkstress.lock import LaneBusy, hold
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "lane.lock"
+            with hold(path, "GitHub Actions run 1 (Stress nightly)"):
+                with self.assertRaises(LaneBusy) as cm:
+                    with hold(path, "by hand"):
+                        pass
+                self.assertIn("Stress nightly", str(cm.exception))
+            with hold(path, "by hand"):
+                pass
+
+    def test_a_waiting_run_gives_up_when_told_to(self):
+        from tkstress.lock import LaneBusy, hold
+        polls = []
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "lane.lock"
+            with hold(path, "first"):
+                with self.assertRaises(LaneBusy):
+                    with hold(path, "second", wait=True, give_up=lambda: polls.append(1) or len(polls) > 2, poll=0.01):
+                        pass
+        self.assertEqual(len(polls), 3)
+
+
 class Lane(unittest.TestCase):
+    def test_a_busy_lane_exits_4_with_a_summary(self):
+        from unittest import mock
+        from harness.config import CONFIG
+        from tkstress import lane as L
+        from tkstress.cli import build_parser
+        from tkstress.lock import hold
+        args = build_parser().parse_args(["run", "--minutes", "30", "--seed", "7"])
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.dict(CONFIG.values, {"TH_RUNS_DIR": d}), mock.patch.object(L, "CACHE_DIR", Path(d)):
+            with hold(Path(d) / "lane.lock", "the nightly"), contextlib.redirect_stdout(io.StringIO()):
+                code = L.Lane(args).execute()
+            result = json.loads(next(Path(d).glob("*/result.json")).read_text())
+        self.assertEqual(code, L.EXIT_BUSY)
+        self.assertEqual(result["status"], "busy")
+
     def test_only_a_webdriveragent_this_checkout_started_counts_as_ours(self):
         from unittest import mock
         from harness import wda as W

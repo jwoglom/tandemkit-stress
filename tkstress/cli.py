@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import HARNESS_DIR, REPO_ROOT
+from . import CACHE_DIR, HARNESS_DIR, REPO_ROOT
 
 
 def cmd_scan(args) -> int:
@@ -49,6 +49,7 @@ def cmd_faketandem(args) -> int:
 
 
 def cmd_doctor(args) -> int:
+    from harness.util import HarnessError
     from . import setting
     ok = True
 
@@ -59,8 +60,15 @@ def cmd_doctor(args) -> int:
 
     print("tandemkit-stress")
     item("trio-test-harness", True, str(HARNESS_DIR))
-    for key in ("TRIO_REPO", "TH_DERIVED_DATA", "TH_BUILD_DIR", "TH_RUNS_DIR"):
+    item("build cache", True, str(CACHE_DIR))
+    for key in ("TRIO_REPO", "TH_DERIVED_DATA", "TH_BUILD_DIR", "TH_RUNS_DIR", "TH_SIM_NAME"):
         item(key, True, os.environ.get(key, ""))
+    from .lock import LaneBusy, hold
+    try:
+        with hold(CACHE_DIR / "lane.lock", "tandemkit-stress doctor"):
+            item("stress lane", True, "free")
+    except LaneBusy as e:
+        item("stress lane", True, str(e))
     if setting("FAKETANDEM_BIN"):
         item("faketandem binary", Path(setting("FAKETANDEM_BIN")).exists(), setting("FAKETANDEM_BIN"))
     else:
@@ -71,7 +79,18 @@ def cmd_doctor(args) -> int:
         item("websocket-client", True)
     except ImportError:
         item("websocket-client", False, "./setup.sh")
-    item("gh (file-issues)", shutil.which("gh"), shutil.which("gh") or "brew install gh", warn=True)
+    from .issues import check_gh, issues_repo
+    repo = issues_repo()
+    if not shutil.which("gh"):
+        item("gh (--file-issues)", False, "brew install gh", warn=True)
+    elif not repo:
+        item("gh (--file-issues)", False, "no repository: set TKSTRESS_ISSUES_REPO", warn=True)
+    else:
+        try:
+            check_gh(repo)
+            item("gh (--file-issues)", True, f"can file into {repo}")
+        except HarnessError as e:
+            item("gh (--file-issues)", False, str(e)[:160], warn=True)
     try:
         from harness import xcode
         app = xcode.find_xcode()
@@ -90,7 +109,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_run_arguments(sp.add_parser("run", help="checkout + build + chaos rounds + recovery checks until a deadline"))
     fi = sp.add_parser("file-issues", help="one GitHub issue per distinct finding of a run (deduplicated)")
     fi.add_argument("run_dir")
-    fi.add_argument("--repo", help="owner/repo (default $GITHUB_REPOSITORY)")
+    fi.add_argument("--repo", help="owner/repo (default TKSTRESS_ISSUES_REPO, GITHUB_REPOSITORY in CI, else this "
+                                   "checkout's origin)")
     fi.add_argument("--kinds", help="only these finding kinds, comma-separated")
     fi.add_argument("--dry-run", action="store_true", help="print the issues instead of filing them")
     sc = sp.add_parser("scan", help="findings in sanitizer output, crash reports (.ips) or `sample` output files")
