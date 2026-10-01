@@ -3,7 +3,7 @@
 # `tandemkit-stress run` injects pump-side events, link faults and app kills (docs/lane.md). Findings become issues in
 # this repository: one per fingerprint, a repeat comments on the open issue.
 # It has no trigger of its own: stress-sim-nightly.yml (6 hours from 02:00 New York time) and stress-sim-manual.yml
-# (1 hour, on demand) call it.
+# (on demand, an hour by default) call it.
 name: Stress job
 
 on:

@@ -1,8 +1,9 @@
-# A one-hour run of the simulator stress job (stress-sim-job.yml), started by hand: a TandemKit branch or PR, a seed
-# to reproduce, another intensity or chaos mix.
+# The simulator stress job (stress-sim-job.yml), started by hand for as long as asked (an hour by default): a TandemKit
+# branch or PR, a seed to reproduce, another intensity or chaos mix.
 #   gh workflow run stress-sim-manual.yml -R jwoglom/tandemkit-stress -f tandemkit=jwoglom/TandemKit#470 -f seed=42
-name: Stress manual (1 h)
-run-name: "stress (1 h): TandemKit ${{ inputs.tandemkit }}${{ inputs.seed && format(' seed {0}', inputs.seed) || '' }}"
+#   gh workflow run stress-sim-manual.yml -R jwoglom/tandemkit-stress -f minutes=240
+name: Stress manual
+run-name: "stress: TandemKit ${{ inputs.tandemkit }}, ${{ inputs.minutes }} min${{ inputs.seed && format(', seed {0}', inputs.seed) || '' }}"
 
 on:
   workflow_dispatch:
@@ -16,7 +17,7 @@ on:
         type: string
         default: "nightscout/Trio:feat/tandem-closed-beta"
       minutes:
-        description: "Run budget in minutes, build included (at most 60)"
+        description: "Run budget in minutes, build included (1 to 1425)"
         type: number
         default: 60
       seed:
@@ -61,12 +62,33 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The job's limit is the run budget plus 15 minutes for issues and artifacts, and expressions cannot add. The 24-hour
+  # ceiling is GITHUB_TOKEN's lifetime, which the job needs at the end to file issues.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      minutes: ${{ steps.plan.outputs.minutes }}
+      timeout: ${{ steps.plan.outputs.timeout }}
+    steps:
+      - id: plan
+        env:
+          IN_MINUTES: ${{ inputs.minutes }}
+        run: |
+          if ! [[ "$IN_MINUTES" =~ ^[0-9]+$ ]] || (( 10#$IN_MINUTES < 1 || 10#$IN_MINUTES > 1425 )); then
+            echo "::error title=minutes::must be a whole number from 1 to 1425"
+            exit 1
+          fi
+          minutes=$(( 10#$IN_MINUTES ))
+          echo "minutes=$minutes" >> "$GITHUB_OUTPUT"
+          echo "timeout=$(( minutes + 15 ))" >> "$GITHUB_OUTPUT"
+
   stress:
+    needs: plan
     uses: ./.github/workflows/stress-sim-job.yml
     with:
-      # A workflow_dispatch number input arrives here as a string; the job's input is a number.
-      minutes: ${{ fromJSON(inputs.minutes) }}
-      timeout_minutes: 75
+      minutes: ${{ fromJSON(needs.plan.outputs.minutes) }}
+      timeout_minutes: ${{ fromJSON(needs.plan.outputs.timeout) }}
       tandemkit: ${{ inputs.tandemkit }}
       trio: ${{ inputs.trio }}
       seed: ${{ inputs.seed }}

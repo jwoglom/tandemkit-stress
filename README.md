@@ -5,8 +5,8 @@ and t:slim X2. It looks for crashes, data races, hangs and failures to recover. 
 under load, with its Bluetooth link broken on purpose. Every finding becomes an issue in this repository.
 
 The one lane built so far is Trio on the iOS Simulator against [faketandem](https://github.com/jwoglom/faketandem),
-the Tandem pump emulator. It runs for six hours every night from 2am Eastern on a self-hosted Mac, and for an
-hour whenever it is started by hand.
+the Tandem pump emulator. It runs for six hours every night from 2am Eastern on a self-hosted Mac, and for as long
+as asked (an hour by default) whenever it is started by hand.
 - **Build:** nightscout/Trio `feat/tandem-closed-beta`, with its TandemKit submodule moved to TandemKit `dev`, built
   with the virtual pump and ThreadSanitizer.
 - **Chaos:** seeded pump-side events, link faults, app kills and UI noise. Every round ends with a check that the
@@ -31,7 +31,7 @@ git clone --recurse-submodules https://github.com/jwoglom/tandemkit-stress && cd
 ./setup.sh                                          # venv with this repo's and trio-test-harness's requirements
 ./tandemkit-stress doctor                           # tools, cache, lane lock, and whether gh can file issues
 
-./tandemkit-stress run --file-issues                # 1 hour, like stress-sim-manual.yml
+./tandemkit-stress run --file-issues                # 1 hour, stress-sim-manual.yml's default
 ./tandemkit-stress run --minutes 360 --file-issues  # 6 hours, like the nightly
 ./tandemkit-stress run --tandemkit jwoglom/TandemKit#470 --seed 42 --minutes 30
 ./tandemkit-stress file-issues runs/<run>           # file a finished run's findings afterwards
@@ -88,7 +88,7 @@ settings work too.
 | Workflow | Runs on | What |
 |---|---|---|
 | `stress-sim-nightly.yml` | 02:00 America/New_York every night | The lane for 6 hours (360-minute run, 375-minute job). |
-| `stress-sim-manual.yml` | by hand (`workflow_dispatch`) | The lane for 1 hour (60-minute run, 75-minute job), with inputs for the TandemKit ref, seed, intensity and chaos mix. |
+| `stress-sim-manual.yml` | by hand (`workflow_dispatch`) | The lane for `minutes` (60 by default, up to 1425; the job gets 15 more), with inputs for the TandemKit ref, seed, intensity and chaos mix. |
 | `stress-sim-job.yml` | called by the two above | The job itself, on `[self-hosted, macOS, worker]`. Files issues for findings and build breaks. |
 | `tests.yml` | `ubuntu-latest`, every push and PR | Unit tests, including one against a live faketandem. |
 
@@ -104,7 +104,7 @@ One-time setup:
 4. **The submodule pin.** It points at the trio-test-harness commit that adds the build options this lane uses
    (`conditions`, `sanitizer`, `save`, `timeout`). Once that branch is merged, move the pin to the merged commit.
 
-The first build is cold and long with TSan, so a manual run may spend its whole hour on it: it is reported as
+The first build is cold and long with TSan, so a one-hour manual run may spend all of it building: it is reported as
 `build-incomplete` or `built-only`, not a failure. The build cache persists, so later runs rebuild little more than
 TandemKit. A job that finds the lane held by a run started by hand on that Mac exits with 4. It ends with a warning,
 not a failure.
