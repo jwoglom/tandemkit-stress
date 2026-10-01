@@ -64,7 +64,8 @@ jobs:
   stress:
     uses: ./.github/workflows/stress-sim-job.yml
     with:
-      minutes: ${{ inputs.minutes }}
+      # A workflow_dispatch number input arrives here as a string; the job's input is a number.
+      minutes: ${{ fromJSON(inputs.minutes) }}
       timeout_minutes: 75
       tandemkit: ${{ inputs.tandemkit }}
       trio: ${{ inputs.trio }}
