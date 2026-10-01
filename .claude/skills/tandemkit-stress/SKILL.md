@@ -26,7 +26,9 @@ plus `FAKETANDEM_JAR`. `./tandemkit-stress doctor` checks all of this.
 
 ## Read a run (`runs/<ts>-stress-<ref>/`)
 - `summary.md`: verdict, commits, seed, findings table, and per-round intensity, recovery, memory and threads.
-- `findings.json`: kind, component, title, fingerprint, signature, excerpt, evidence paths.
+- `findings.json`: kind, component, title, fingerprint, signature, report, rounds seen, evidence paths, and the
+  context captured when it first appeared (what its issue shows).
+- `issues.json`: the issue (or comment) each fingerprint was filed as during the run.
 - `actions.jsonl`: every chaos action with round, parameters and result (`ok` / `skipped` / `error`).
 - `app/launch-NN.stderr`: the app's stderr per launch, where TSan reports land. Also `crashes/*.ips` and
   `hangs/*.txt`.

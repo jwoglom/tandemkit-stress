@@ -133,12 +133,15 @@ workflow with no trigger of its own; both of them call it.
   App token (`TRIO_E2E_APP_ID` / `TRIO_E2E_APP_KEY`, contents read on trio-test-harness and TandemKit). That token
   lasts an hour, so the build step fetches everything from GitHub in its first minutes, and the stress step needs
   nothing from GitHub. faketandem, which is public, is fetched anonymously first.
-- **Issues.** Findings (stress exit 1) and build breaks (build exit 3) go to this repository through `file-issues` with the
-  workflow's `GITHUB_TOKEN` (`issues: write`):
+- **Issues.** The Build and Stress steps run with `--file-issues` and `TKSTRESS_ISSUES_TOKEN` set to the workflow's
+  `GITHUB_TOKEN` (`issues: write`). Each new finding is filed the moment it is seen; a final step files whatever a
+  stopped run did not get to.
   - one issue per fingerprint, marked `<!-- stress-fingerprint: … -->`, labelled `stress` and `stress:<kind>`
-  - a repeat comments on the open issue
+  - the body carries the full report and the context captured when it appeared (actions, faketandem messages,
+    TandemKit's log, round/launch/memory), so it reads without the artifact
+  - a repeat within the run gets one closing comment with its count; one in a later run comments on the open issue
   - a fingerprint whose issue was closed gets a new issue that links the old one
-  - bodies are scrubbed of long hex/base64 strings and home paths
+  - bodies are scrubbed of long hex/base64 strings, UUIDs and home paths
   - nothing is filed in TandemKit; a confirmed driver bug is promoted there by hand
 - **Artifacts.** The whole run directory, kept for 14 days.
 

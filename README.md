@@ -40,8 +40,8 @@ git clone --recurse-submodules https://github.com/jwoglom/tandemkit-stress && cd
 ```
 
 How a run behaves:
-- **Issues.** `--file-issues` checks before the run starts that `gh` can reach the issues repository, so a long run
-  never ends unable to file. The repository is this checkout's `origin` (jwoglom/tandemkit-stress), or
+- **Issues.** `--file-issues` files each new finding the moment the run sees it, from a background thread. It checks
+  before the run starts that `gh` can reach the issues repository, so a long run never ends unable to file. The repository is this checkout's `origin` (jwoglom/tandemkit-stress), or
   `--issues-repo` / `TKSTRESS_ISSUES_REPO`. Issues filed from a Mac name the run directory instead of an Actions run.
 - **Sleep.** The run holds a `caffeinate` assertion, so an idle Mac does not sleep partway through. That does not
   cover a closed laptop on battery.
@@ -117,11 +117,25 @@ build cache persists, so later runs rebuild little more than TandemKit. A job th
 
 ## Issues
 
-`file-issues` opens one issue per distinct failure, identified by kind plus the top non-system stack frames.
-- **Repeats:** a repeat comments on the open issue with the commit and seed. A failure whose issue was closed gets a
-  new issue linking the old one.
+One issue per distinct failure, identified by kind plus the top non-system stack frames.
+- **When:** as soon as the run sees a failure, from a background thread. Sanitizer output is scanned every 30
+  seconds and at each round's end; crashes, hangs and failed reconnects are filed when detected. `issues.json` in the
+  run directory records what was filed. `file-issues` afterwards (CI's catch-all step) files only what the run did
+  not get to.
+- **What an issue holds,** so it can be read without the run's logs:
+  - the full report: sanitizer report with every stack; crash with the crashed thread, last exception backtrace and
+    every other thread's top frames; the hang's main-thread sample; the reconnect check with faketandem's state
+  - when it happened: round and intensity, minutes into the stress, app launch and pid, memory and threads
+  - the 30 chaos actions before it, the last 80 messages faketandem saw (kind, message, txId, faults, cargo) and
+    the last 200 lines of TandemKit's log
+  - commits, seed and the command to reproduce it
+
+  Sections are collapsed and cut to fit GitHub's limit.
+- **Repeats:** a fingerprint seen again in the same run gets one closing comment with its count and rounds. Seen in a
+  later run, it gets a comment on the open issue with that run's report and context. A failure whose issue was closed
+  gets a new issue linking the old one.
 - **Labels:** `stress` and `stress:<kind>`.
-- **Scrubbing:** bodies are scrubbed of keys and home paths. The full logs stay in the run's artifact, or
+- **Scrubbing:** bodies are scrubbed of long hex and base64 strings (keys), UUIDs and home paths. The full logs stay in the run's artifact, or
   in the run directory on the Mac for a run started by hand.
 - **TandemKit:** nothing is filed there automatically. A confirmed driver bug gets a TandemKit issue or fix PR that
   links back here.

@@ -40,13 +40,14 @@ import shutil
 import signal
 import subprocess
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 from harness.util import HarnessError, log
 from . import CACHE_DIR, HARNESS_DIR
 from .lock import LaneBusy, holder_description
 from .detect import (Finding, Findings, crash_finding, default_crash_dirs, find_crash_reports, parse_ips,
-                     sample_finding, scan_stderr)
+                     sample_finding, stderr_reports)
 
 DEFAULT_TRIO = "nightscout/Trio:feat/tandem-closed-beta"
 DEFAULT_TANDEMKIT = "dev"
@@ -117,8 +118,61 @@ def build_failure(errors: str, trio: str, tandemkit: str) -> Finding:
                    signature=[norm[:300]], component="TandemKit", details=errors[-6000:])
 
 
+def tail_lines(path: Path, n: int, max_bytes: int = 400_000) -> list[str]:
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - max_bytes))
+            return fh.read().decode(errors="replace").splitlines()[-n:]
+    except OSError:
+        return []
+
+
+def format_actions(lines: list[str]) -> str:
+    out = []
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        params = " ".join(f"{k}={v}" for k, v in (r.get("params") or {}).items())
+        out.append(f"{(r.get('t') or '')[11:]} r{r.get('round')} {r.get('category')}/{r.get('action')}"
+                   + (f" {params}" if params else "") + f" -> {r.get('result')}"
+                   + (f": {r['detail']}" if r.get("detail") else ""))
+    return "\n".join(out)
+
+
+def format_requests(lines: list[str]) -> str:
+    """faketandem's request log, one message per line: time, seq, kind, message, txId, link state, faults, cargo."""
+    out = []
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if e.get("kind") == "harness-note":
+            out.append(f"[{e.get('note')}]")
+            continue
+        bits = [(e.get("time") or "")[11:23], f"#{e.get('seq')}", f"{e.get('kind', ''):<12}", e.get("message") or ""]
+        if e.get("tx_id") is not None:
+            bits.append(f"tx={e['tx_id']}")
+        if e.get("connected") is not None:
+            bits.append("connected" if e["connected"] else "disconnected")
+        frags = e.get("fragments") or []
+        if frags and e.get("fragments_sent", 0) != len(frags):
+            bits.append(f"{e.get('fragments_sent', 0)}/{len(frags)} fragments sent")
+        if e.get("fault"):
+            bits.append(f"fault={e['fault']}")
+        if e.get("note"):
+            bits.append(str(e["note"]))
+        if e.get("cargo"):
+            bits.append(json.dumps(e["cargo"], separators=(",", ":"), default=str)[:300])
+        out.append(" ".join(b for b in bits if b))
+    return "\n".join(out)
+
+
 class Lane:
-    def __init__(self, args):
+    def __init__(self, args, issues_repo: str | None = None):
         self.args = args
         self.t0 = time.time()
         self.stress = hasattr(args, "minutes")
@@ -138,9 +192,88 @@ class Lane:
         self.status = "running"
         self.note = ""
         self.req_seq = 0
+        self.issues_repo = issues_repo
+        self.publisher = None
+        self.intensity_now: str | None = None
+        self.stderr_seen: set[tuple[str, int]] = set()
+        self.stderr_sizes: dict[str, int] = {}
+        self.last_scan = 0.0
 
     def left(self) -> float:
         return self.deadline - time.time() if self.deadline else float("inf")
+
+    # ---------------- findings -----------------
+
+    def add_finding(self, f: Finding) -> None:
+        """Record a finding; the first time its fingerprint appears, with the context its issue needs, filed at once."""
+        if f.round is None and self.chaos and self.chaos.round:
+            f.round = self.chaos.round
+        new = f.fp not in self.findings.items
+        if new:
+            try:
+                f.context = {**self.capture_context(), **f.context}
+            except Exception as e:  # noqa: BLE001 - a finding without context beats no finding
+                log(f"capturing context for {f.kind} failed: {type(e).__name__}: {e}")
+        self.findings.add(f)
+        if new and self.publisher:
+            self.publisher.submit(asdict(f), self.run.meta)
+
+    def capture_context(self) -> dict[str, str]:
+        """What a reader of the issue would otherwise go to the run's logs for, as of now."""
+        if self.fk and self.fk.alive():
+            self.dump_requests()
+        when = []
+        if self.chaos and self.chaos.round:
+            when.append(f"round {self.chaos.round}" + (f" ({self.intensity_now} chaos)" if self.intensity_now else ""))
+        if self.stress_started:
+            when.append(f"{(time.time() - self.stress_started) / 60:.0f} min into the stress")
+        if self.app and self.app.launches:
+            when.append(f"app launch {len(self.app.launches)}, pid {self.app.pid}")
+            m = self.app.metrics()
+            if m:
+                when.append(f"{m.get('rss_mb')} MB resident, {m.get('threads')} threads")
+        when.append(dt.datetime.now().isoformat(timespec="seconds"))
+        p = self.run.path
+        return {k: v for k, v in {
+            "When": " · ".join(when),
+            "Chaos actions before it (last 30)": format_actions(tail_lines(p / "actions.jsonl", 30)),
+            "Messages faketandem saw (last 80)": format_requests(tail_lines(p / "faketandem-requests.jsonl", 80)),
+            "TandemKit log (last 200 lines)": "\n".join(tail_lines(p / "tandemkit-oslog.txt", 200)),
+        }.items() if v}
+
+    def scan_stderr(self, *, final: bool = False) -> None:
+        """New sanitizer and Main Thread Checker reports in the app's stderr. A report the live launch is still
+        writing waits for the next scan; `final` takes everything."""
+        if not self.app:
+            return
+        files = self.app.stderr_files()
+        live = files[-1] if files and not final and self.app.alive() else None
+        for p in files:
+            try:
+                size = p.stat().st_size
+            except OSError:
+                continue
+            if p != live and self.stderr_sizes.get(p.name) == size:
+                continue
+            complete_scan = True
+            for start, complete, f in stderr_reports(p.read_text(errors="replace")):
+                if (p.name, start) in self.stderr_seen:
+                    continue
+                if not complete and p == live:
+                    complete_scan = False
+                    continue
+                self.stderr_seen.add((p.name, start))
+                f.evidence = [f"app/{p.name}"]
+                self.add_finding(f)
+            if complete_scan and p != live:
+                self.stderr_sizes[p.name] = size
+
+    def tick(self) -> bool:
+        """Chaos's should_stop: also scans stderr every 30 s, so a sanitizer report is filed minutes after it."""
+        if time.time() - self.last_scan > 30:
+            self.last_scan = time.time()
+            self.scan_stderr()
+        return self.app.died_unexpectedly()
 
     # ---------------- stages -----------------
 
@@ -163,7 +296,9 @@ class Lane:
             raise _Stop("build-incomplete", f"{e}. Nothing was stress-tested; the next build continues from "
                         "DerivedData.", EXIT_INCOMPLETE) from None
         except HarnessError as e:
-            self.findings.add(build_failure(str(e), a.trio, a.tandemkit))
+            f = build_failure(str(e), a.trio, a.tandemkit)
+            f.context = {"xcodebuild log (last 150 lines)": "\n".join(tail_lines(self.run.path / "xcodebuild.log", 150))}
+            self.add_finding(f)
             raise _Stop("build-failed", "Trio did not build against this TandemKit", EXIT_BUILD) from None
         return Path(bi.app_path), bi.bundle_id, bi.xcode
 
@@ -293,20 +428,16 @@ class Lane:
                 fh.write(json.dumps(e) + "\n")
         self.req_seq = max(e.get("seq", 0) for e in entries if "seq" in e)
 
-    def recent_actions(self, n: int = 40) -> str:
-        p = self.run.path / "actions.jsonl"
-        lines = p.read_text().splitlines()[-n:] if p.exists() else []
-        return "\n".join(lines)
-
     def check_app(self, r: int) -> None:
         if self.app.died_unexpectedly():
             pid = self.app.pid
             time.sleep(3)          # ReportCrash needs a moment to write the .ips
-            self.findings.add(Finding(kind="app-died", title="Trio exited without the harness ending it",
-                                      signature=["app-died"], round=r,
-                                      details=f"pid {pid}; see crashes/ and app/launch-*.stderr\n\n"
-                                              f"recent actions:\n{self.recent_actions()}"))
+            self.add_finding(Finding(kind="app-died", title="Trio exited without the harness ending it",
+                                     signature=["app-died"], round=r,
+                                     details=f"pid {pid} (launch {len(self.app.launches)}) exited; its crash report, "
+                                             "if one was written, is filed as its own finding"))
             self.collect_crashes()
+            self.scan_stderr()
             self.app.launch()
 
     def check_hang(self, r: int) -> None:
@@ -326,7 +457,7 @@ class Lane:
         if self.app.sample(dest):
             f = sample_finding(dest.read_text(errors="replace"), what=f"accessibility query took {took:.0f}s")
             f.round, f.evidence = r, [str(dest.relative_to(self.run.path))]
-            self.findings.add(f)
+            self.add_finding(f)
 
     def rounds_loop(self):
         from harness.flows import trio as F
@@ -345,9 +476,10 @@ class Lane:
             self.chaos.round = r
             intensity = INTENSITY_CYCLE[(r - 1) % len(INTENSITY_CYCLE)] if a.intensity == "cycle" else a.intensity
             self.chaos.gaps = INTENSITY_GAPS[intensity]
+            self.intensity_now = intensity
             span = min(round_s, max(self.left(), MIN_ROUND_S))
             log(f"== round {r}: {intensity} chaos for {span / 60:.1f} min")
-            recs = self.chaos.run_for(span, should_stop=self.app.died_unexpectedly)
+            recs = self.chaos.run_for(span, should_stop=self.tick)
             self.check_app(r)
             self.chaos.quiesce()
             res = recovery.check(self.fk.client, session_timeout=a.session_timeout, probe_timeout=a.probe_timeout)
@@ -370,12 +502,18 @@ class Lane:
                 sample.parent.mkdir(exist_ok=True)
                 if self.app.sample(sample):
                     ev.append(str(sample.relative_to(self.run.path)))
-                self.findings.add(Finding(
+                try:
+                    pump = self.fk.client.snapshot()
+                except HarnessError as e:
+                    pump = f"unavailable: {e}"
+                self.add_finding(Finding(
                     kind="no-recovery", title=f"TandemKit did not recover after the faults stopped ({res['stage']} check)",
                     signature=[res["stage"]], component="TandemKit", round=r, evidence=ev,
-                    details=json.dumps(res, indent=2) + f"\n\nlast actions:\n{self.recent_actions()}"))
+                    details=json.dumps({"recovery check": res, "faketandem state after it": pump}, indent=2,
+                                       default=str)))
             self.check_hang(r)
             self.check_app(r)
+            self.scan_stderr()
         return r
 
     # ---------------- collection -----------------
@@ -395,7 +533,7 @@ class Lane:
                 continue           # the harness ended this process
             f = crash_finding(crash)
             f.evidence = [f"crashes/{p.name}"]
-            self.findings.add(f)
+            self.add_finding(f)
 
     def collect(self) -> None:
         for step, fn in (("chaos quiesce", lambda: self.chaos and self.chaos.quiesce()),
@@ -403,21 +541,13 @@ class Lane:
                          ("log stream", lambda: self.logstream and self.logstream.stop()),
                          ("app", lambda: self.app and self.app.terminate()),
                          ("crash reports", self.collect_crashes),
-                         ("sanitizer reports", self.collect_stderr),
+                         ("sanitizer reports", lambda: self.scan_stderr(final=True)),
                          ("app logs", self.copy_app_logs),
                          ("faketandem", lambda: self.fk and self.fk.stop())):
             try:
                 fn()
             except Exception as e:  # noqa: BLE001 - collect everything that can be collected
                 log(f"collect: {step} failed: {type(e).__name__}: {e}")
-
-    def collect_stderr(self) -> None:
-        if not self.app:
-            return
-        for p in self.app.stderr_files():
-            for f in scan_stderr(p.read_text(errors="replace")):
-                f.evidence = [f"app/{p.name}"]
-                self.findings.add(f)
 
     def copy_app_logs(self) -> None:
         if not self.container:
@@ -463,10 +593,12 @@ class Lane:
         if self.note:
             lines += [self.note, ""]
         if failures:
-            lines += [f"### Findings ({len(failures)})", "", "| kind | component | finding | fingerprint | seen |",
-                      "|---|---|---|---|---|"]
-            lines += [f"| {f.kind} | {f.component} | {f.title.replace('|', '/')} | `{f.fp}` | {f.occurrences} |"
-                      for f in failures]
+            from .issues import read_ledger
+            filed = read_ledger(self.run.path)
+            lines += [f"### Findings ({len(failures)})", "", "| kind | component | finding | fingerprint | seen | issue |",
+                      "|---|---|---|---|---|---|"]
+            lines += [f"| {f.kind} | {f.component} | {f.title.replace('|', '/')} | `{f.fp}` | {f.occurrences} | "
+                      f"{filed.get(f.fp, {}).get('url', '')} |" for f in failures]
             lines.append("")
         elif self.rounds:
             lines += ["No findings.", ""]
@@ -502,7 +634,7 @@ class Lane:
         self.bring_up_ui()
         ok, st = recovery.wait_for_session(self.fk.client, a.session_timeout + 60)
         if not ok:
-            self.findings.add(Finding(
+            self.add_finding(Finding(
                 kind="no-recovery", title="TandemKit never connected to faketandem after launch",
                 signature=["initial-session"], component="TandemKit",
                 details=f"faketandem state: {st}\nThe pump was seeded as paired (PumpManagerState.plist) "
@@ -530,6 +662,9 @@ class Lane:
                                {"kind": "stress", "title": f"TandemKit stress: Trio {a.trio} + TandemKit {a.tandemkit}",
                                 "args": own, **({"seed": self.seed} if self.stress else {})})
         self.findings = Findings(self.run.path / "findings.json")
+        if self.issues_repo:
+            from .issues import Publisher
+            self.publisher = Publisher(self.issues_repo, self.run.path)
         log(f"{'stress run' if self.stress else 'build'} {self.run.path} (cache {CACHE_DIR}"
             + (f", seed {self.seed}, {a.minutes:g} min of stress after setup)" if self.stress else ")"))
         code = EXIT_CLEAN
@@ -558,6 +693,8 @@ class Lane:
         if code == EXIT_CLEAN and any(f.kind in FAILURE_KINDS for f in self.findings):
             code = EXIT_FINDINGS
         self.findings.save()
+        if self.publisher:
+            self.publisher.close()
         text = self.summary(code)
         (self.run.path / "summary.md").write_text(text)
         result = {"status": self.status, "exit_code": code, "run_dir": str(self.run.path),
@@ -596,14 +733,7 @@ def _lane_with_issues(args) -> int:
         issues.check_gh(repo)
     keep_awake()
     signal.signal(signal.SIGTERM, signal.default_int_handler)
-    lane = Lane(args)
-    code = lane.execute()
-    if repo and code in (EXIT_FINDINGS, EXIT_BUILD):
-        try:
-            issues.file_issues(lane.run.path, repo)
-        except HarnessError as e:
-            log(f"filing issues failed: {e}\nretry with: ./tandemkit-stress file-issues {lane.run.path} --repo {repo}")
-    return code
+    return Lane(args, issues_repo=repo).execute()
 
 
 def cmd_run(args) -> int:

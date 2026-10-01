@@ -76,6 +76,7 @@ jobs:
       IN_INTENSITY: ${{ inputs.intensity || 'cycle' }}
       IN_SANITIZER: ${{ inputs.sanitizer || 'thread' }}
       IN_CATEGORIES: ${{ inputs.categories }}
+      IN_FILE_ISSUES: ${{ inputs.file_issues }}
       TH_XCODE_APP: /Applications/Xcode_${{ inputs.xcode || '26.2' }}.app
       TH_SIM_DEVICE: iPhone 17
       TH_TRIO_ORIGIN: nightscout/Trio
@@ -148,6 +149,7 @@ jobs:
         env:
           TH_GIT_TOKEN: ${{ steps.token.outputs.token }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
+          TKSTRESS_ISSUES_TOKEN: ${{ github.token }}
           IN_BUILD_MINUTES: ${{ inputs.build_minutes }}
         run: |
           set -uo pipefail
@@ -158,6 +160,10 @@ jobs:
           args=(--trio "$IN_TRIO" --tandemkit "$IN_TANDEMKIT" --sanitizer "$IN_SANITIZER"
                 --build-minutes "$build" --result-json "$RUNNER_TEMP/build-result.json")
           [ -z "$IN_FAKETANDEM_REF" ] || args+=(--faketandem-ref "$IN_FAKETANDEM_REF")
+          if [ "$IN_FILE_ISSUES" = true ]; then
+            if command -v gh >/dev/null; then args+=(--file-issues)
+            else echo "::warning title=Findings not filed::gh is not installed on this runner"; fi
+          fi
           rc=0
           ./tandemkit-stress build "${args[@]}" || rc=$?
           field() { .venv/bin/python -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' \
@@ -165,27 +171,33 @@ jobs:
           { echo "rc=$rc"; echo "status=$(field status)"; echo "run_dir=$(field run_dir)"; } >> "$GITHUB_OUTPUT"
           exit 0
 
+      # Each new finding is filed as an issue the moment the run sees it (tkstress/issues.py, Publisher).
       - name: Stress
         id: stress
         if: steps.build.outputs.status == 'built'
         env:
           RUN_DIR: ${{ steps.build.outputs.run_dir }}
           IN_MINUTES: ${{ inputs.minutes }}
+          TKSTRESS_ISSUES_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
           args=(--build "$RUN_DIR" --minutes "$IN_MINUTES" --until "$(( JOB_WALL - 20 * 60 ))"
                 --intensity "$IN_INTENSITY" --result-json "$RUNNER_TEMP/stress-result.json")
           [ -z "$IN_SEED" ] || args+=(--seed "$IN_SEED")
           [ -z "$IN_CATEGORIES" ] || args+=(--categories "$IN_CATEGORIES")
+          if [ "$IN_FILE_ISSUES" = true ]; then
+            if command -v gh >/dev/null; then args+=(--file-issues)
+            else echo "::warning title=Findings not filed::gh is not installed on this runner"; fi
+          fi
           rc=0
           ./tandemkit-stress run "${args[@]}" || rc=$?
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
           exit 0
 
-      # A build break (build rc 3) or findings (stress rc 1). A confirmed driver bug is promoted to TandemKit by a
-      # person; nothing is filed there from here.
-      - name: File issues
-        if: always() && inputs.file_issues && steps.build.outputs.run_dir != '' && (steps.build.outputs.rc == '3' || steps.stress.outputs.rc == '1')
+      # The steps above file as they go; this files whatever they could not (a run stopped first), skipping what
+      # issues.json says is filed. A confirmed driver bug is promoted to TandemKit by a person; nothing is filed there.
+      - name: File issues not yet filed
+        if: always() && inputs.file_issues && steps.build.outputs.run_dir != ''
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_DIR: ${{ steps.build.outputs.run_dir }}

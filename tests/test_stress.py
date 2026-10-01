@@ -13,6 +13,7 @@ import plistlib
 import random
 import tempfile
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 
 from tkstress import chaos as C
@@ -64,6 +65,12 @@ class SanitizerReports(unittest.TestCase):
 
 
 class CrashAndHangReports(unittest.TestCase):
+    def test_crash_details_carry_the_other_threads(self):
+        crash = D.parse_ips(FIX / "trio-crash.ips")
+        details = D.crash_finding(crash).details
+        self.assertIn("crashed thread:", details)
+        self.assertIn("other threads (top app frames):", details)
+
     def test_ips(self):
         crash = D.parse_ips(FIX / "trio-crash.ips")
         self.assertEqual(crash["proc"], "Trio")
@@ -298,7 +305,104 @@ class Lock(unittest.TestCase):
         self.assertEqual(len(polls), 3)
 
 
+class LiveFiling(unittest.TestCase):
+    """The publisher and file-issues against a stand-in `gh`."""
+
+    def setUp(self):
+        from unittest import mock
+        self.calls = []
+
+        def gh(args, **_):
+            self.calls.append(args)
+            out = "[]" if args[:2] == ["issue", "list"] else (
+                "https://github.com/o/r/issues/7\n" if args[:2] == ["issue", "create"] else "")
+            return mock.Mock(returncode=0, stdout=out, stderr="")
+        self.patch = mock.patch.object(I, "_gh", gh)
+        self.patch.start()
+        self.dir = tempfile.TemporaryDirectory()
+        self.run_dir = Path(self.dir.name)
+        (self.run_dir / "run.json").write_text(json.dumps({"args": {"trio": "t", "tandemkit": "dev"}, "seed": 3}))
+
+    def tearDown(self):
+        self.patch.stop()
+        self.dir.cleanup()
+
+    def finding(self, occurrences=1, rounds=(2,)):
+        f = D.Finding(kind="tsan", title="race", signature=["data race", "a", "b"], round=rounds[0],
+                      occurrences=occurrences, rounds=list(rounds), details="report",
+                      context={"When": "round 2", "TandemKit log (last 200 lines)": "log line"})
+        return asdict(f)
+
+    def creates_and_comments(self):
+        return ([c for c in self.calls if c[:2] == ["issue", "create"]],
+                [c for c in self.calls if c[:2] == ["issue", "comment"]])
+
+    def test_the_publisher_files_once_and_closes_out_a_repeat_with_its_count(self):
+        first = self.finding()
+        publisher = I.Publisher("o/r", self.run_dir)
+        publisher.submit(first, {"args": {}, "seed": 3})
+        (self.run_dir / "findings.json").write_text(json.dumps([self.finding(occurrences=3, rounds=(2, 5, 9))]))
+        with contextlib.redirect_stdout(io.StringIO()):
+            publisher.close(timeout=30)
+        creates, comments = self.creates_and_comments()
+        self.assertEqual(len(creates), 1)
+        self.assertIn("TandemKit log", creates[0][creates[0].index("--body") + 1])
+        self.assertEqual(len(comments), 1)
+        self.assertIn("3× in all, in rounds 2, 5, 9", comments[0][comments[0].index("--body") + 1])
+        self.assertEqual(I.read_ledger(self.run_dir)[first["fp"]]["number"], 7)
+        with contextlib.redirect_stdout(io.StringIO()):
+            I.file_issues(self.run_dir, "o/r")
+        self.assertEqual(self.creates_and_comments(), (creates, comments))
+
+    def test_a_body_with_huge_context_still_fits(self):
+        f = self.finding()
+        f["details"] = "x" * 100000
+        f["context"] = {f"section {i}": "log line\n" * 20000 for i in range(5)}
+        body = I.issue_body(f, {"args": {}}, self.run_dir)
+        self.assertLessEqual(len(body), I.BODY_LIMIT)
+        self.assertIn("section 4", body)
+
+
 class Lane(unittest.TestCase):
+    def test_a_report_still_being_written_waits_for_its_summary(self):
+        from unittest import mock
+        from tkstress import lane as L
+        from tkstress.cli import build_parser
+        report = (FIX / "tsan-darwin.txt").read_text().splitlines(keepends=True)
+        cut = next(i for i, line in enumerate(report) if line.startswith("SUMMARY"))
+        with tempfile.TemporaryDirectory() as d:
+            stderr = Path(d) / "launch-01.stderr"
+            stderr.write_text("".join(report[:cut]))
+            lane = L.Lane(build_parser().parse_args(["run"]))
+            lane.run = mock.Mock(path=Path(d))
+            lane.findings = D.Findings(Path(d) / "findings.json")
+            lane.app = mock.Mock(stderr_files=lambda: [stderr], alive=lambda: True, metrics=lambda: {}, launches=[{}],
+                                 pid=1)
+            lane.scan_stderr()
+            self.assertEqual(len(lane.findings), 0)
+            stderr.write_text("".join(report))
+            lane.scan_stderr()
+            self.assertEqual([f.kind for f in lane.findings], ["tsan"])
+            lane.scan_stderr(final=True)
+            found = list(lane.findings)
+        # the fixture's Main Thread Checker report has no end marker, so only the final scan takes it
+        self.assertEqual([(f.kind, f.occurrences) for f in found], [("tsan", 1), ("main-thread", 1)])
+        self.assertIn("When", found[0].context)
+
+    def test_request_log_lines_read_as_a_conversation(self):
+        from tkstress.lane import format_requests
+        text = format_requests([
+            json.dumps({"seq": 4, "time": "2026-10-01T12:00:01.123456Z", "kind": "request",
+                        "message": "InsulinStatusRequest", "tx_id": 9, "cargo": {"a": 1}}),
+            json.dumps({"seq": 5, "time": "2026-10-01T12:00:01.200000Z", "kind": "response",
+                        "message": "InsulinStatusResponse", "fragments": ["aa", "bb"], "fragments_sent": 1,
+                        "fault": "disconnect"}),
+            json.dumps({"kind": "harness-note", "note": "ring overflow"})])
+        self.assertEqual(text.splitlines(), [
+            '12:00:01.123 #4 request      InsulinStatusRequest tx=9 {"a":1}',
+            "12:00:01.200 #5 response     InsulinStatusResponse 1/2 fragments sent fault=disconnect",
+            "[ring overflow]"])
+
     def test_a_busy_lane_exits_4_with_a_summary(self):
         from unittest import mock
         from harness.config import CONFIG
@@ -391,7 +495,7 @@ class Lane(unittest.TestCase):
             return {"ok": True, "stage": "probe", "seconds": 30}
         lane = L.Lane(build_parser().parse_args(["run", "--minutes", "10"]))
         lane.run, lane.fk, lane.ui = mock.Mock(path=Path(tempfile.gettempdir())), mock.Mock(), None
-        lane.app = mock.Mock(died_unexpectedly=lambda: False, metrics=lambda: {})
+        lane.app = mock.Mock(died_unexpectedly=lambda: False, metrics=lambda: {}, stderr_files=lambda: [])
         lane.dump_requests = lambda: None
         with mock.patch.object(L, "time", mock.Mock(time=lambda: clock[0])), \
                 mock.patch("tkstress.chaos.Chaos", FakeChaos), mock.patch("tkstress.recovery.check", check):
