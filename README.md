@@ -5,8 +5,8 @@ and t:slim X2. It looks for crashes, data races, hangs and failures to recover. 
 under load, with its Bluetooth link broken on purpose. Every finding becomes an issue in this repository.
 
 The one lane built so far is Trio on the iOS Simulator against [faketandem](https://github.com/jwoglom/faketandem),
-the Tandem pump emulator. It runs for six hours every night from 2am Eastern on a self-hosted Mac, and for as long
-as asked (an hour by default) whenever it is started by hand.
+the Tandem pump emulator. It runs twice every night on a self-hosted Mac, from 2am and from 6am Eastern, each for as
+long as the runner's 4-hour job limit allows, and for as long as asked (an hour by default) when started by hand.
 - **Build:** nightscout/Trio `feat/tandem-closed-beta`, with its TandemKit submodule moved to TandemKit `dev`, built
   with the virtual pump and ThreadSanitizer.
 - **Chaos:** seeded pump-side events, link faults, app kills and UI noise. Every round ends with a check that the
@@ -32,7 +32,7 @@ git clone --recurse-submodules https://github.com/jwoglom/tandemkit-stress && cd
 ./tandemkit-stress doctor                           # tools, cache, lane lock, and whether gh can file issues
 
 ./tandemkit-stress run --file-issues                # build, then 1 hour of stress (stress-sim-manual.yml's default)
-./tandemkit-stress run --minutes 360 --file-issues  # build, then 6 hours, like the nightly
+./tandemkit-stress run --minutes 200 --file-issues  # build, then about what each nightly job gets
 ./tandemkit-stress build                            # only the build: warm the cache, or check Trio compiles
 ./tandemkit-stress run --tandemkit jwoglom/TandemKit#470 --seed 42 --minutes 30
 ./tandemkit-stress file-issues runs/<run>           # file a finished run's findings afterwards
@@ -40,8 +40,8 @@ git clone --recurse-submodules https://github.com/jwoglom/tandemkit-stress && cd
 ```
 
 How a run behaves:
-- **Issues.** `--file-issues` checks before the run starts that `gh` can reach the issues repository, so a long run
-  never ends unable to file. The repository is this checkout's `origin` (jwoglom/tandemkit-stress), or
+- **Issues.** `--file-issues` files each new finding the moment the run sees it, from a background thread. It checks
+  before the run starts that `gh` can reach the issues repository, so a long run never ends unable to file. The repository is this checkout's `origin` (jwoglom/tandemkit-stress), or
   `--issues-repo` / `TKSTRESS_ISSUES_REPO`. Issues filed from a Mac name the run directory instead of an Actions run.
 - **Sleep.** The run holds a `caffeinate` assertion, so an idle Mac does not sleep partway through. That does not
   cover a closed laptop on battery.
@@ -61,10 +61,10 @@ Exit codes:
 |---|---|
 | 0 | Clean, or (`build`) built. |
 | 1 | Findings. |
-| 2 | Harness failure. |
+| 2 | Harness failure, or stopped by a signal (a summary is still written). |
 | 3 | Trio does not build. |
 | 4 | Another stress run on this Mac held the lane. `--wait` queues behind it instead. |
-| 5 | The build stopped at `--build-minutes`, so nothing was stress-tested. The next build continues from DerivedData. |
+| 5 | Nothing was stress-tested: the build stopped at `--build-minutes` (the next build continues from DerivedData), or `--until` left no time for a round. |
 
 What the lane shares and what it keeps to itself:
 - **trio-test-harness.** The lane builds on [trio-test-harness](https://github.com/jwoglom/trio-test-harness), the
@@ -89,7 +89,7 @@ settings work too.
 
 | Workflow | Runs on | What |
 |---|---|---|
-| `stress-sim-nightly.yml` | 02:00 America/New_York every night | A build (up to 120 minutes), then 6 hours of stress. |
+| `stress-sim-nightly.yml` | 02:00 and 06:00 America/New_York every night | A build (up to 120 minutes), then stress until 20 minutes before the runner's 4-hour limit. |
 | `stress-sim-manual.yml` | by hand (`workflow_dispatch`) | A build (`build_minutes`, 120 by default), then `minutes` of stress (60 by default), with inputs for the TandemKit ref, seed, intensity and chaos mix. |
 | `stress-sim-job.yml` | called by the two above | The job itself, on `[self-hosted, macOS, worker]`: a Build step, then a Stress step if the build finished. Files issues for findings and build breaks. |
 | `tests.yml` | `ubuntu-latest`, every push and PR | Unit tests, including one against a live faketandem. |
@@ -108,18 +108,39 @@ One-time setup:
 4. **The submodule pin.** It points at the trio-test-harness commit that adds the build options this lane uses
    (`conditions`, `sanitizer`, `save`, `timeout`). Once that branch is merged, move the pin to the merged commit.
 
-`minutes` is the stress alone: the build and simulator setup come before it. The first build is cold and long with
+`minutes` is the stress alone: the build and simulator setup come before it. The runners stop a job 4 hours after
+it starts and anything not yet uploaded is lost, so the job ends its stress 20 minutes before that (`--until`), and
+holds the build to what fits. The first build is cold and long with
 TSan; if it reaches the build limit, the job fails (nothing was tested) and the next run continues the build. A
 job is green only when the stress ran and found nothing. The
 build cache persists, so later runs rebuild little more than TandemKit. A job that finds the lane held by a run started by hand on that Mac fails with "lane busy".
 
 ## Issues
 
-`file-issues` opens one issue per distinct failure, identified by kind plus the top non-system stack frames.
-- **Repeats:** a repeat comments on the open issue with the commit and seed. A failure whose issue was closed gets a
-  new issue linking the old one.
+One issue per distinct failure, identified by kind plus the top non-system stack frames.
+- **When:** as soon as the run sees a failure, from a background thread. Sanitizer output is scanned every 30
+  seconds and at each round's end; crashes, hangs and failed reconnects are filed when detected. `issues.json` in the
+  run directory records what was filed. `file-issues` afterwards (CI's catch-all step) files only what the run did
+  not get to.
+- **What an issue holds,** so it can be read without the run's logs:
+  - the full report: sanitizer report with every stack; crash with the crashed thread, last exception backtrace and
+    every other thread's top frames; the hang's main-thread sample; the reconnect check with faketandem's state
+  - when it happened: round and intensity, minutes into the stress, app launch and pid, memory and threads
+  - the 30 chaos actions before it, the last 80 messages faketandem saw (kind, message, txId, faults, cargo) and
+    the last 200 lines of TandemKit's log
+  - commits, seed and the command to reproduce it
+  - the finding's files attached: the `.ips` crash report, the hang sample, the launch's stderr, screenshots
+
+  Sections are collapsed and cut to fit GitHub's limit.
+- **Attachments:** the REST API cannot attach a file to an issue, so files go up as assets of a monthly pre-release,
+  `stress-attachments-YYYY-MM`, and the issue links them. That needs `contents: write`, which the workflows grant;
+  a local run uses your `gh` login. A crash report loses its crash-reporter key, incident ID, home path and the
+  simulator's device ID before upload. Its image UUIDs stay, so Xcode can still symbolicate it.
+- **Repeats:** a fingerprint seen again in the same run gets one closing comment with its count and rounds. Seen in a
+  later run, it gets a comment on the open issue with that run's report and context. A failure whose issue was closed
+  gets a new issue linking the old one.
 - **Labels:** `stress` and `stress:<kind>`.
-- **Scrubbing:** bodies are scrubbed of keys and home paths. The full logs stay in the run's artifact, or
+- **Scrubbing:** bodies are scrubbed of long hex and base64 strings (keys), UUIDs and home paths. The full logs stay in the run's artifact, or
   in the run directory on the Mac for a run started by hand.
 - **TandemKit:** nothing is filed there automatically. A confirmed driver bug gets a TandemKit issue or fix PR that
   links back here.

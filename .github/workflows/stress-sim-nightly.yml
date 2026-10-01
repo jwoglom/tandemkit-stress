@@ -1,15 +1,19 @@
-# The simulator stress job (stress-sim-job.yml) every night from 02:00 New York time: a build of closed-beta Trio
-# with TandemKit dev and ThreadSanitizer (up to two hours), then six hours of stress at cycling intensity, issues
-# filed for findings.
-name: Stress nightly (6 h)
+# The simulator stress job (stress-sim-job.yml) twice a night, at 02:00 and 06:00 New York time: a build of
+# closed-beta Trio with TandemKit dev and ThreadSanitizer, then stress at cycling intensity until 20 minutes before the
+# runner's 4-hour limit, issues filed for findings. A job that starts late (the runner was busy) is cut by the same
+# limit; the second waits for the first in the concurrency group.
+name: Stress nightly
 
 on:
   schedule:
     - cron: "0 2 * * *"
       timezone: "America/New_York"
+    - cron: "0 6 * * *"
+      timezone: "America/New_York"
 
+# contents: write is for the release assets that issues attach files with (tkstress/issues.py, attach).
 permissions:
-  contents: read
+  contents: write
   issues: write
 
 # Shared with stress-sim-manual.yml: both use the same simulator and build cache on the runner.
@@ -21,9 +25,8 @@ jobs:
   stress:
     uses: ./.github/workflows/stress-sim-job.yml
     with:
-      minutes: 360
+      minutes: 240
       build_minutes: 120
-      timeout_minutes: 525
     secrets:
       TRIO_E2E_APP_ID: ${{ secrets.TRIO_E2E_APP_ID }}
       TRIO_E2E_APP_KEY: ${{ secrets.TRIO_E2E_APP_KEY }}

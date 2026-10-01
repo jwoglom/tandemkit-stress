@@ -107,6 +107,8 @@ class Finding:
     time: str = field(default_factory=lambda: dt.datetime.now().isoformat(timespec="seconds"))
     occurrences: int = 1
     fp: str = ""
+    rounds: list[int] = field(default_factory=list)     # every round it was seen in
+    context: dict[str, str] = field(default_factory=dict)  # captured when first seen, for the issue (lane.capture_context)
 
     def __post_init__(self):
         self.fp = self.fp or fingerprint(self.kind, *self.signature)
@@ -128,6 +130,9 @@ class Findings:
             self.items[f.fp] = f
         else:
             self.items[f.fp].occurrences += 1
+        held = self.items[f.fp]
+        if f.round is not None and f.round not in held.rounds:
+            held.rounds.append(f.round)
         self.save()
         return new
 
@@ -164,11 +169,11 @@ def parse_sanitizer_reports(text: str) -> list[dict]:
     """Every sanitizer report in `text`: {"tool", "kind", "summary", "stacks": [[Frame]], "text"}."""
     reports: list[dict] = []
     cur: dict | None = None
-    for line in text.splitlines():
+    for i, line in enumerate(text.splitlines()):
         m = SAN_START.match(line)
         if m:
             cur = {"tool": m.group(1), "kind": m.group(2).strip(), "summary": "", "stacks": [], "lines": [line],
-                   "_take": True}
+                   "_take": True, "start": i, "complete": False}
             reports.append(cur)
             continue
         if cur is None:
@@ -176,6 +181,7 @@ def parse_sanitizer_reports(text: str) -> list[dict]:
         cur["lines"].append(line)
         if line.startswith("SUMMARY: "):
             cur["summary"] = line[len("SUMMARY: "):].strip()
+            cur["complete"] = True
             cur = None
             continue
         fm = SAN_FRAME.match(line)
@@ -211,7 +217,7 @@ def sanitizer_finding(report: dict, *, top: int = 3) -> Finding:
     lead = next((f for f in frames_all if f.interesting), frames_all[0] if frames_all else None)
     title = f"{report['tool']}: {report['kind']}" + (f" in {demangle(lead.symbol)}" if lead else "")
     return Finding(kind=kind, title=title[:200], signature=sig, component=component_of(frames_all),
-                   details=report["text"][:6000])
+                   details=report["text"][:40000])
 
 
 # ---------------- Main Thread Checker -----------------
@@ -221,7 +227,11 @@ MTC_FRAME = re.compile(r"^\s*\d+\s+(\S+)\s+0x[0-9a-f]+\s+(.+?)(?:\s+\+\s+\d+)?\s
 
 
 def parse_main_thread_checker(text: str) -> list[Finding]:
-    out: list[Finding] = []
+    return [f for _, f in _main_thread_checker_reports(text)]
+
+
+def _main_thread_checker_reports(text: str) -> list[tuple[int, Finding]]:
+    out: list[tuple[int, Finding]] = []
     lines = text.splitlines()
     for i, line in enumerate(lines):
         m = MTC_START.match(line)
@@ -236,9 +246,9 @@ def parse_main_thread_checker(text: str) -> list[Finding]:
                 frames.append(Frame(fm.group(2), fm.group(1)))
         keep = [f for f in frames if f.interesting][:3]
         api = re.sub(r"0x[0-9a-f]+", "", m.group(1)).strip()
-        out.append(Finding(kind="main-thread", title=f"Main Thread Checker: {api}"[:200],
-                           signature=[api, *[f.short() for f in keep]], component=component_of(frames),
-                           details="\n".join(lines[i:i + 40])))
+        out.append((i, Finding(kind="main-thread", title=f"Main Thread Checker: {api}"[:200],
+                               signature=[api, *[f.short() for f in keep]], component=component_of(frames),
+                               details="\n".join(lines[i:i + 40]))))
     return out
 
 
@@ -258,13 +268,19 @@ def parse_ips(path: Path) -> dict | None:
     threads = body.get("threads") or []
     ft = body.get("faultingThread", 0)
     thread = threads[ft] if 0 <= ft < len(threads) else (threads[0] if threads else {})
-    frames = []
-    for f in thread.get("frames", []):
-        idx = f.get("imageIndex", -1)
-        mod = images[idx].get("name", "") if 0 <= idx < len(images) else ""
-        loc = f"{f['sourceFile']}:{f.get('sourceLine', 0)}" if f.get("sourceFile") else ""
-        frames.append(Frame(f.get("symbol", "") or f"{mod}+{f.get('imageOffset', 0)}", mod, loc))
+    def frames_of(raw: list) -> list[Frame]:
+        out = []
+        for f in raw:
+            idx = f.get("imageIndex", -1)
+            mod = images[idx].get("name", "") if 0 <= idx < len(images) else ""
+            loc = f"{f['sourceFile']}:{f.get('sourceLine', 0)}" if f.get("sourceFile") else ""
+            out.append(Frame(f.get("symbol", "") or f"{mod}+{f.get('imageOffset', 0)}", mod, loc))
+        return out
+    frames = frames_of(thread.get("frames", []))
+    others = [{"index": i, "name": t.get("name") or t.get("queue") or "", "frames": frames_of(t.get("frames", []))}
+              for i, t in enumerate(threads) if t is not thread]
     return {"proc": body.get("procName") or header.get("app_name", ""), "pid": body.get("pid"),
+            "last_exception": frames_of(body.get("lastExceptionBacktrace") or []), "threads": others,
             "bundle": header.get("bundleID") or (body.get("bundleInfo") or {}).get("CFBundleIdentifier", ""),
             "time": header.get("timestamp") or body.get("captureTime", ""),
             "exception": body.get("exception") or {}, "termination": body.get("termination") or {},
@@ -281,8 +297,19 @@ def crash_finding(crash: dict, *, top: int = 4) -> Finding:
     lines = [f"process: {crash['proc']} ({crash['bundle']})", f"exception: {what}", f"queue: {crash['queue']}"]
     if asi:
         lines.append(f"application specific: {asi[:1500]}")
+    term = crash["termination"]
+    if term:
+        lines.append(f"termination: {term.get('namespace', '')} {term.get('code', '')} {term.get('indicator', '')}".rstrip())
     lines += ["", "crashed thread:"] + [f"  {i:2d} {f.short()}" + (f"  {f.location}" if f.location else "")
-                                         for i, f in enumerate(crash["frames"][:40])]
+                                         for i, f in enumerate(crash["frames"][:60])]
+    if crash.get("last_exception"):
+        lines += ["", "last exception backtrace:"] + [f"  {i:2d} {f.short()}" + (f"  {f.location}" if f.location else "")
+                                                       for i, f in enumerate(crash["last_exception"][:40])]
+    if crash.get("threads"):
+        lines += ["", "other threads (top app frames):"]
+        for t in crash["threads"][:60]:
+            top = [f for f in t["frames"] if f.interesting][:3] or t["frames"][:3]
+            lines.append(f"  #{t['index']} {t['name']}: " + " < ".join(f.short() for f in top))
     return Finding(kind="crash", title=f"Crash ({what}) in {lead}"[:200], signature=[what, *[f.short() for f in keep]],
                    component=component_of(crash["frames"]), details="\n".join(lines))
 
@@ -311,6 +338,15 @@ def scan_stderr(text: str) -> list[Finding]:
     return [sanitizer_finding(r) for r in parse_sanitizer_reports(text)] + parse_main_thread_checker(text)
 
 
+def stderr_reports(text: str) -> list[tuple[int, bool, Finding]]:
+    """(first line, complete, finding) for every report in a stderr that may still be growing. A sanitizer report is
+    complete at its SUMMARY line; a Main Thread Checker report has no end marker, so it waits for the lines its parse
+    reads."""
+    n = len(text.splitlines())
+    return ([(r["start"], r["complete"], sanitizer_finding(r)) for r in parse_sanitizer_reports(text)]
+            + [(i, i + 60 <= n, f) for i, f in _main_thread_checker_reports(text)])
+
+
 def sample_finding(sample_text: str, *, what: str) -> Finding:
     """A hang: the main thread's stack from macOS `sample` output, reduced to its first app frames."""
     # "    2580 Thread_1234   DispatchQueue_1: com.apple.main-thread  (serial)" up to the next thread's header
@@ -325,4 +361,4 @@ def sample_finding(sample_text: str, *, what: str) -> Finding:
     deepest = [f for f in reversed(frames) if f.interesting][:3]
     return Finding(kind="hang", title=f"Main thread unresponsive ({what})" + (f" in {deepest[0].symbol}" if deepest else ""),
                    signature=[f.short() for f in deepest] or [what], component=component_of(list(reversed(frames))),
-                   details=(main.group(0) if main else sample_text)[:6000])
+                   details=(main.group(0) if main else sample_text)[:30000])
