@@ -2,6 +2,7 @@
 # TandemKit dev, built with the virtual pump and ThreadSanitizer, on the iOS Simulator against faketandem, while
 # `tandemkit-stress run` injects pump-side events, link faults and app kills (docs/lane.md). Findings become issues in
 # this repository: one per fingerprint, a repeat comments on the open issue.
+# The build is its own step, with its own limit, and `minutes` is the stress alone.
 # It has no trigger of its own: stress-sim-nightly.yml (6 hours from 02:00 New York time) and stress-sim-manual.yml
 # (on demand, an hour by default) call it.
 name: Stress job
@@ -10,11 +11,15 @@ on:
   workflow_call:
     inputs:
       minutes:
-        description: "Run budget in minutes, build included (at most timeout_minutes - 15)"
+        description: "Minutes of stress, from the first round (the build, simulator setup and collection not counted)"
+        type: number
+        required: true
+      build_minutes:
+        description: "Most minutes the build may take; a build stopped there is continued by the next run"
         type: number
         required: true
       timeout_minutes:
-        description: "The job's limit; the last 15 minutes are kept for issues and artifacts"
+        description: "The job's limit: build_minutes + minutes + 45 (checkout, setup, the last check, issues, artifacts)"
         type: number
         required: true
       trio:
@@ -77,18 +82,6 @@ jobs:
       TH_GIT_MIRRORS: /Volumes/work/mirrors
       TH_WDA_PREBUILT: /Volumes/work/cache/wda/current
     steps:
-      # The run's deadline counts from here, leaving the end of the job for issues and artifacts.
-      - name: Start the clock
-        env:
-          IN_MINUTES: ${{ inputs.minutes }}
-          JOB_MINUTES: ${{ inputs.timeout_minutes }}
-        run: |
-          cap=$(( JOB_MINUTES - 15 ))
-          minutes=$cap
-          if [[ "$IN_MINUTES" =~ ^[0-9]+$ ]] && (( 10#$IN_MINUTES > 0 && 10#$IN_MINUTES < cap )); then minutes=$(( 10#$IN_MINUTES )); fi
-          echo "run budget: $minutes minutes"
-          echo "STRESS_DEADLINE=$(( $(date +%s) + minutes * 60 ))" >> "$GITHUB_ENV"
-
       - uses: actions/checkout@v4
 
       - name: Pinned trio-test-harness commit
@@ -98,7 +91,8 @@ jobs:
         run: echo "ref=${HARNESS_REF:-$(git ls-tree HEAD trio-test-harness | awk '{print $3}')}" >> "$GITHUB_OUTPUT"
 
       # Contents: read on jwoglom/trio-test-harness (the submodule) and jwoglom/TandemKit (Trio's submodule). An App
-      # token lasts an hour: the lane fetches everything it needs from GitHub in its first minutes.
+      # token lasts an hour: the build step fetches everything it needs from GitHub in its first minutes, and the
+      # stress step needs nothing from GitHub.
       - name: GitHub App token (jwoglom)
         id: token
         uses: actions/create-github-app-token@v2
@@ -107,6 +101,11 @@ jobs:
           private-key: ${{ secrets.TRIO_E2E_APP_KEY }}
           owner: jwoglom
           repositories: trio-test-harness,TandemKit
+
+      - name: Check the App token can read them
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: scripts/check-app-access.sh jwoglom/trio-test-harness jwoglom/TandemKit
 
       - name: Checkout trio-test-harness
         uses: actions/checkout@v4
@@ -138,58 +137,82 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Stress run
-        id: stress
+      - name: Build Trio and faketandem
+        id: build
         env:
           TH_GIT_TOKEN: ${{ steps.token.outputs.token }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
+          IN_BUILD_MINUTES: ${{ inputs.build_minutes }}
         run: |
           set -uo pipefail
-          args=(--trio "$IN_TRIO" --tandemkit "$IN_TANDEMKIT" --deadline "$STRESS_DEADLINE"
-                --intensity "$IN_INTENSITY" --sanitizer "$IN_SANITIZER" --result-json "$RUNNER_TEMP/stress-result.json")
+          args=(--trio "$IN_TRIO" --tandemkit "$IN_TANDEMKIT" --sanitizer "$IN_SANITIZER"
+                --build-minutes "$IN_BUILD_MINUTES" --result-json "$RUNNER_TEMP/build-result.json")
           [ -z "$IN_FAKETANDEM_REF" ] || args+=(--faketandem-ref "$IN_FAKETANDEM_REF")
+          rc=0
+          ./tandemkit-stress build "${args[@]}" || rc=$?
+          field() { .venv/bin/python -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' \
+                      "$RUNNER_TEMP/build-result.json" "$1" 2>/dev/null || true; }
+          { echo "rc=$rc"; echo "status=$(field status)"; echo "run_dir=$(field run_dir)"; } >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Stress
+        id: stress
+        if: steps.build.outputs.status == 'built'
+        env:
+          RUN_DIR: ${{ steps.build.outputs.run_dir }}
+          IN_MINUTES: ${{ inputs.minutes }}
+        run: |
+          set -uo pipefail
+          args=(--build "$RUN_DIR" --minutes "$IN_MINUTES" --intensity "$IN_INTENSITY"
+                --result-json "$RUNNER_TEMP/stress-result.json")
           [ -z "$IN_SEED" ] || args+=(--seed "$IN_SEED")
           [ -z "$IN_CATEGORIES" ] || args+=(--categories "$IN_CATEGORIES")
           rc=0
           ./tandemkit-stress run "${args[@]}" || rc=$?
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
-          run_dir=$(.venv/bin/python -c 'import json,sys; print(json.load(open(sys.argv[1]))["run_dir"])' \
-                    "$RUNNER_TEMP/stress-result.json" 2>/dev/null || true)
-          echo "run_dir=$run_dir" >> "$GITHUB_OUTPUT"
           exit 0
 
-      # 1: findings, 3: Trio does not build against this TandemKit. A confirmed driver bug is promoted to TandemKit by
-      # a person; nothing is filed there from here.
+      # A build break (build rc 3) or findings (stress rc 1). A confirmed driver bug is promoted to TandemKit by a
+      # person; nothing is filed there from here.
       - name: File issues
-        if: always() && inputs.file_issues && steps.stress.outputs.run_dir != '' && (steps.stress.outputs.rc == '1' || steps.stress.outputs.rc == '3')
+        if: always() && inputs.file_issues && steps.build.outputs.run_dir != '' && (steps.build.outputs.rc == '3' || steps.stress.outputs.rc == '1')
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_DIR: ${{ steps.stress.outputs.run_dir }}
+          RUN_DIR: ${{ steps.build.outputs.run_dir }}
         run: ./tandemkit-stress file-issues "$RUN_DIR" --repo "$GITHUB_REPOSITORY"
 
       - name: Job summary
-        if: always() && steps.stress.outputs.run_dir != ''
+        if: always() && steps.build.outputs.run_dir != ''
         env:
-          RUN_DIR: ${{ steps.stress.outputs.run_dir }}
+          RUN_DIR: ${{ steps.build.outputs.run_dir }}
         run: cat "$RUN_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY" || true
 
-      - name: Upload run (findings, logs, crash reports, faketandem request log)
-        if: always() && steps.stress.outputs.run_dir != ''
+      - name: Upload run (build log, findings, logs, crash reports, faketandem request log)
+        if: always() && steps.build.outputs.run_dir != ''
         uses: actions/upload-artifact@v7
         with:
           name: tandemkit-stress-${{ github.run_id }}
-          path: ${{ steps.stress.outputs.run_dir }}
+          path: ${{ steps.build.outputs.run_dir }}
           retention-days: 14
 
+      # Green only when the stress ran and found nothing: a job that tested nothing fails, whatever the reason.
       - name: Result
         if: always()
         env:
-          RC: ${{ steps.stress.outputs.rc }}
+          BUILD: ${{ steps.build.outputs.status }}
+          STRESS_RC: ${{ steps.stress.outputs.rc }}
+          BUILD_MINUTES: ${{ inputs.build_minutes }}
         run: |
-          case "${RC:-2}" in
-            0) echo "clean (or built without time left to run; see the summary)" ;;
+          case "$BUILD" in
+            built) ;;
+            build-incomplete) echo "::error title=Not tested: build incomplete::the build did not finish within $BUILD_MINUTES minutes, so nothing was stress-tested. The next run continues it from DerivedData; raise build_minutes for a cold cache."; exit 1 ;;
+            build-failed) echo "::error title=Build break::Trio does not build against this TandemKit"; exit 1 ;;
+            busy) echo "::error title=Not tested: lane busy::another stress run on this runner's Mac held the lane; see the job summary"; exit 1 ;;
+            *) echo "::error title=Harness error::the build step did not complete; see its log"; exit 1 ;;
+          esac
+          case "${STRESS_RC:-2}" in
+            0) echo "clean" ;;
             1) echo "::error title=Stress findings::see the job summary and the issues filed"; exit 1 ;;
-            3) echo "::error title=Build break::Trio does not build against this TandemKit"; exit 1 ;;
-            4) echo "::warning title=Not run::another stress run on this runner's Mac held the lane; see the job summary" ;;
-            *) echo "::error title=Harness error::the stress run did not complete; see the step log"; exit 1 ;;
+            4) echo "::error title=Not tested: lane busy::another stress run on this runner's Mac took the lane after the build; see the job summary"; exit 1 ;;
+            *) echo "::error title=Harness error::the stress step did not complete; see its log"; exit 1 ;;
           esac

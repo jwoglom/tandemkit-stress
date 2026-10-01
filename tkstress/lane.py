@@ -1,26 +1,31 @@
-"""`tandemkit-stress run`: Trio on the iOS Simulator against faketandem, with chaos, until a deadline.
+"""`tandemkit-stress build` and `tandemkit-stress run`: Trio on the iOS Simulator against faketandem, with chaos.
 
-    ./tandemkit-stress run                          # closed-beta Trio + TandemKit dev, 60 min budget
+    ./tandemkit-stress run                          # build closed-beta Trio + TandemKit dev, then 60 min of stress
     ./tandemkit-stress run --minutes 360            # what the nightly job runs
     ./tandemkit-stress run --minutes 20 --seed 42 --intensity high
     ./tandemkit-stress run --tandemkit jwoglom/TandemKit#470   # a TandemKit PR instead of dev
     ./tandemkit-stress run --app build/…/Trio.app   # skip checkout and build (an app built with the virtual pump)
     ./tandemkit-stress run --minutes 360 --file-issues   # by hand on a Mac, filing issues through the local `gh` login
+    ./tandemkit-stress build                        # only the build, into a new run directory (CI's first step)
+    ./tandemkit-stress run --build runs/<run>       # stress the build that run directory holds (CI's second step)
 
-Stages, each bounded by the deadline:
-  1. faketandem fetched and built (tkstress/faketandem.py): first, while any CI token is still fresh
-  2. checkout + build: Trio with its TandemKit submodule moved to the requested ref, compiled with
-     TANDEMKIT_VIRTUAL_PUMP (CoreBluetooth replaced by a socket to faketandem) and, by default, ThreadSanitizer
-  3. faketandem started on two free loopback ports, with a random long-term key staged
-  4. simulator: fresh install, onboarding pre-seeded, Trio's settings and a paired Tandem pump written into the
-     container (seed.py), launched with TANDEMKIT_VIRTUAL_PUMP=<faketandem> (app.py)
-  5. rounds: chaos (chaos.py) for --round-minutes, then every fault undone and the recovery check (recovery.py);
-     a dead app is a finding and is relaunched; the app's memory and thread count are recorded per round
-  6. collection: sanitizer and Main Thread Checker reports from every launch's stderr, crash reports, TandemKit's
+The build is its own stage, and --minutes is the stress alone: the clock starts at the first round, so neither the
+build nor the simulator setup nor collection counts against it.
+  1. build (`build`, or the start of `run`): faketandem fetched and built (tkstress/faketandem.py), then Trio with
+     its TandemKit submodule moved to the requested ref, compiled with TANDEMKIT_VIRTUAL_PUMP (CoreBluetooth
+     replaced by a socket to faketandem) and, by default, ThreadSanitizer. build.json in the run directory records
+     what was built, for `run --build`.
+  2. setup: faketandem started on two free loopback ports with a random long-term key staged; fresh install,
+     onboarding pre-seeded, Trio's settings and a paired Tandem pump written into the container (seed.py), launched
+     with TANDEMKIT_VIRTUAL_PUMP=<faketandem> (app.py)
+  3. rounds, for --minutes: chaos (chaos.py) for --round-minutes, then every fault undone and the recovery check
+     (recovery.py); a dead app is a finding and is relaunched; the app's memory and thread count are recorded
+  4. collection: sanitizer and Main Thread Checker reports from every launch's stderr, crash reports, TandemKit's
      OSLog stream and log file, faketandem's request log; findings.json, summary.md, result.json
 
-Exit codes: 0 clean (or built but no time left to run), 1 findings, 2 harness/setup failure, 3 Trio does not build
-against that TandemKit, 4 another stress run on this machine holds the lane (tkstress/lock.py; --wait queues).
+Exit codes: 0 clean (`build`: built), 1 findings, 2 harness/setup failure, 3 Trio does not build against that
+TandemKit, 4 another stress run on this machine holds the lane (tkstress/lock.py; --wait queues), 5 the build stopped
+at --build-minutes, so nothing was stress-tested (the next build continues from DerivedData).
 """
 from __future__ import annotations
 
@@ -43,12 +48,9 @@ from .detect import (Finding, Findings, crash_finding, default_crash_dirs, find_
 
 DEFAULT_TRIO = "nightscout/Trio:feat/tandem-closed-beta"
 DEFAULT_TANDEMKIT = "dev"
-EXIT_CLEAN, EXIT_FINDINGS, EXIT_HARNESS, EXIT_BUILD, EXIT_BUSY = 0, 1, 2, 3, 4
+EXIT_CLEAN, EXIT_FINDINGS, EXIT_HARNESS, EXIT_BUILD, EXIT_BUSY, EXIT_INCOMPLETE = 0, 1, 2, 3, 4, 5
 FAILURE_KINDS = {"crash", "tsan", "asan", "main-thread", "no-recovery", "hang", "app-died"}
 
-SETUP_RESERVE_S = 8 * 60        # simulator boot, install, launch, WDA, CGM
-CHECK_RESERVE_S = 4 * 60        # one quiesce + recovery check at its slowest
-COLLECT_RESERVE_S = 3 * 60      # stopping everything, crash reports, summary
 MIN_ROUND_S = 60
 # --intensity cycle: rounds alternate, so a long run sees the driver both flooded and given room to settle
 INTENSITY_CYCLE = ["medium", "high", "low", "high"]
@@ -65,6 +67,21 @@ def new_run(name: str, meta: dict):
     write_json(run.meta_path, {"name": name, "created": dt.datetime.now().isoformat(timespec="seconds"),
                                "status": "running", **meta})
     return run
+
+
+def open_run(path: Path):
+    from harness.report import Run
+    run = Run(path.expanduser().resolve())
+    if not (run.path / "build.json").exists():
+        raise HarnessError(f"{run.path} holds no build (build.json): make one with `tandemkit-stress build`")
+    return run
+
+
+def app_stamp(app: Path) -> list[int]:
+    """The main executable's size and mtime: a rebuild of the app relinks it."""
+    info = plistlib.loads((app / "Info.plist").read_bytes())
+    st = (app / info.get("CFBundleExecutable", "Trio")).stat()
+    return [st.st_size, st.st_mtime_ns]
 
 
 def wda_started_here() -> bool:
@@ -84,7 +101,8 @@ def tandemkit_spec(ref: str) -> str:
 
 def build_failure(errors: str, trio: str, tandemkit: str) -> Finding:
     """One issue per distinct break: keyed on the first compiler error with paths and line numbers removed."""
-    first = next((l for l in errors.splitlines() if "error:" in l), errors.strip().splitlines()[0] if errors.strip() else "")
+    first = next((l for l in errors.splitlines() if re.search(r"(?:^|: )error: ", l)),
+                 errors.strip().splitlines()[0] if errors.strip() else "")
     norm = re.sub(r"(/[^\s:]+/)", "", first)
     norm = re.sub(r":\d+(:\d+)?", "", norm).strip()
     return Finding(kind="build", title=f"Trio ({trio}) does not build against TandemKit {tandemkit}"[:200],
@@ -95,8 +113,11 @@ class Lane:
     def __init__(self, args):
         self.args = args
         self.t0 = time.time()
-        self.deadline = float(args.deadline) if args.deadline else self.t0 + args.minutes * 60
-        self.seed = args.seed if args.seed is not None else random.randrange(1, 2**31)
+        self.stress = hasattr(args, "minutes")
+        self.deadline: float | None = None          # set when the first round starts
+        self.stress_started: float | None = None
+        seed = getattr(args, "seed", None)
+        self.seed = seed if seed is not None else random.randrange(1, 2**31)
         self.fk = None
         self.app = None
         self.logstream = None
@@ -110,34 +131,60 @@ class Lane:
         self.req_seq = 0
 
     def left(self) -> float:
-        return self.deadline - time.time()
+        return self.deadline - time.time() if self.deadline else float("inf")
 
     # ---------------- stages -----------------
 
     def checkout_and_build(self):
         from harness import build as B
         a = self.args
-        if a.app:
+        if getattr(a, "app", None):
             app = Path(a.app).expanduser().resolve()
             info = plistlib.loads((app / "Info.plist").read_bytes())
-            self.run.update_meta(app=str(app), git={"note": "prebuilt app; commits unknown"})
-            return app, info["CFBundleIdentifier"]
+            self.run.update_meta(git={"note": "prebuilt app; commits unknown"})
+            return app, info["CFBundleIdentifier"], None
         src, info = B.prepare_source(branch=a.trio, submodules=[tandemkit_spec(a.tandemkit)])
         self.run.update_meta(git={k: info.get(k) for k in ("branch", "sha", "describe", "submodules",
                                                             "submodule_overrides")})
-        budget = self.left() - SETUP_RESERVE_S - MIN_ROUND_S - CHECK_RESERVE_S - COLLECT_RESERVE_S
         try:
             bi = B.build(src, "sim", configuration="Debug", git_info=info, log_path=self.run.path / "xcodebuild.log",
                          conditions=("TANDEMKIT_VIRTUAL_PUMP",), sanitizer=None if a.sanitizer == "none" else a.sanitizer,
-                         save=False, timeout=max(budget, 60) if a.enforce_deadline else None)
+                         save=False, timeout=a.build_minutes * 60 if a.build_minutes else None)
         except B.BuildTimeout as e:
-            raise _Stop("build-incomplete", f"{e}. Not a failure: the next run continues from DerivedData.",
-                        EXIT_CLEAN) from None
+            raise _Stop("build-incomplete", f"{e}. Nothing was stress-tested; the next build continues from "
+                        "DerivedData.", EXIT_INCOMPLETE) from None
         except HarnessError as e:
             self.findings.add(build_failure(str(e), a.trio, a.tandemkit))
             raise _Stop("build-failed", "Trio did not build against this TandemKit", EXIT_BUILD) from None
-        self.run.update_meta(build={"xcode": bi.xcode, "app": bi.app_path, "bundle_id": bi.bundle_id})
-        return Path(bi.app_path), bi.bundle_id
+        return Path(bi.app_path), bi.bundle_id, bi.xcode
+
+    def build_phase(self) -> tuple[Path, str]:
+        a = self.args
+        t = time.time()
+        self.prepare_faketandem()
+        app, bundle_id, xcode = self.checkout_and_build()
+        build = {"app": str(app), "bundle_id": bundle_id, "stamp": app_stamp(app), "xcode": xcode,
+                 "trio": a.trio, "tandemkit": a.tandemkit, "sanitizer": a.sanitizer,
+                 "minutes": round((time.time() - t) / 60, 1),
+                 "faketandem": {"binary": str(self.fk.binary), "jar": str(self.fk.jar), "info": self.fk.info}}
+        (self.run.path / "build.json").write_text(json.dumps(build, indent=2))
+        self.run.update_meta(build={k: v for k, v in build.items() if k != "faketandem"})
+        log(f"built in {build['minutes']:.0f} min: {app}")
+        return app, bundle_id
+
+    def load_build(self) -> tuple[Path, str]:
+        """The build `tandemkit-stress build` left in this run directory, refused if the app changed since."""
+        from .faketandem import Faketandem
+        b = json.loads((self.run.path / "build.json").read_text())
+        app = Path(b["app"])
+        if not app.exists() or app_stamp(app) != b["stamp"]:
+            raise HarnessError(f"{app} is not the app this run's build step made: it was rebuilt or removed since "
+                               "(another stress run on this machine?); build again")
+        for k in ("trio", "tandemkit", "sanitizer"):
+            setattr(self.args, k, b[k])
+        fk = b["faketandem"]
+        self.fk = Faketandem(Path(fk["binary"]), Path(fk["jar"]), fk["info"])
+        return app, b["bundle_id"]
 
     def prepare_faketandem(self):
         from .faketandem import Faketandem
@@ -284,12 +331,12 @@ class Lane:
                            log_path=self.run.path / "actions.jsonl")
         round_s = a.round_minutes * 60
         r = 0
-        while self.left() > min(round_s, MIN_ROUND_S) + CHECK_RESERVE_S + COLLECT_RESERVE_S:
+        while r == 0 or self.left() >= MIN_ROUND_S:
             r += 1
             self.chaos.round = r
             intensity = INTENSITY_CYCLE[(r - 1) % len(INTENSITY_CYCLE)] if a.intensity == "cycle" else a.intensity
             self.chaos.gaps = INTENSITY_GAPS[intensity]
-            span = min(round_s, self.left() - CHECK_RESERVE_S - COLLECT_RESERVE_S)
+            span = min(round_s, max(self.left(), MIN_ROUND_S))
             log(f"== round {r}: {intensity} chaos for {span / 60:.1f} min")
             recs = self.chaos.run_for(span, should_stop=self.app.died_unexpectedly)
             self.check_app(r)
@@ -388,14 +435,20 @@ class Lane:
         skipped = sum(v for k, v in counts.items() if k.endswith(":skipped"))
         errors = sum(v for k, v in counts.items() if k.endswith(":error"))
         failures = [f for f in self.findings if f.kind in FAILURE_KINDS or f.kind == "build"]
+        build = meta.get("build") or {}
         lines = [f"## TandemKit stress (simulator + faketandem): {self.status}", "",
                  f"Trio `{self.args.trio}` @ `{git.get('sha', '?')}` · TandemKit `{self.args.tandemkit}` @ "
                  f"`{subs.get('TandemKit', '?')}` · faketandem `{fk.get('ref', fk.get('source', '?'))}` @ "
                  f"`{fk.get('sha', '?')}`",
-                 f"seed `{self.seed}` · sanitizer `{self.args.sanitizer}` · intensity `{self.args.intensity}` · "
-                 f"{len(self.rounds)} rounds · {applied} actions applied ({skipped} skipped, {errors} errors) · "
-                 f"{len(self.app.launches) if self.app else 0} app launches · "
-                 f"{(time.time() - self.t0) / 60:.0f} min", ""]
+                 " · ".join([f"sanitizer `{self.args.sanitizer}`"]
+                            + ([f"built in {build['minutes']:.0f} min"] if build.get("minutes") is not None else [])
+                            + ([f"Xcode {build['xcode']}"] if build.get("xcode") else []))]
+        if self.stress:
+            stress_min = (time.time() - self.stress_started) / 60 if self.stress_started else 0
+            lines.append(f"seed `{self.seed}` · intensity `{self.args.intensity}` · {len(self.rounds)} rounds in "
+                         f"{stress_min:.0f} of {self.args.minutes:g} min · {applied} actions applied ({skipped} skipped, "
+                         f"{errors} errors) · {len(self.app.launches) if self.app else 0} app launches")
+        lines.append("")
         if self.note:
             lines += [self.note, ""]
         if failures:
@@ -419,67 +472,81 @@ class Lane:
                       f"{'ok' if r['ok'] else 'FAILED at ' + r['stage']} | {r.get('seconds', '?')}s | "
                       f"{r.get('rss_mb', '')} | {r.get('threads', '')} |" for r in self.rounds]
             lines.append("")
-        lines.append(f"Reproduce: `./tandemkit-stress run --trio {self.args.trio} --tandemkit "
-                     f"{subs.get('TandemKit') or self.args.tandemkit} --seed {self.seed} --intensity {self.args.intensity}`"
-                     " (the seed fixes the plan of actions, not thread timing)")
+        tk = subs.get("TandemKit") or self.args.tandemkit
+        if self.stress:
+            lines.append(f"Reproduce: `./tandemkit-stress run --trio {self.args.trio} --tandemkit {tk} --seed {self.seed} "
+                         f"--intensity {self.args.intensity}` (the seed fixes the plan of actions, not thread timing)")
+        else:
+            lines.append(f"Rebuild: `./tandemkit-stress build --trio {self.args.trio} --tandemkit {tk}`")
         return "\n".join(lines) + "\n"
 
     # ---------------- driver -----------------
 
+    def stress_phase(self, app: Path, bundle_id: str) -> None:
+        from . import recovery
+        a = self.args
+        self.start_faketandem()
+        self.install_and_seed(app, bundle_id)
+        self.launch(bundle_id)
+        self.bring_up_ui()
+        ok, st = recovery.wait_for_session(self.fk.client, a.session_timeout + 60)
+        if not ok:
+            self.findings.add(Finding(
+                kind="no-recovery", title="TandemKit never connected to faketandem after launch",
+                signature=["initial-session"], component="TandemKit",
+                details=f"faketandem state: {st}\nThe pump was seeded as paired (PumpManagerState.plist) "
+                        "with the key faketandem holds; see tandemkit-oslog.txt and faketandem.log."))
+            raise _Stop("no-initial-session", "TandemKit never connected; no rounds run", EXIT_FINDINGS)
+        self.run.log_step("connected", "TandemKit authenticated with faketandem")
+        self.stress_started = time.time()
+        self.deadline = self.stress_started + a.minutes * 60
+        self.rounds_loop()
+
     def execute(self) -> int:
         from . import lock
         a = self.args
-        self.run = new_run("stress-" + re.sub(r"[^\w.-]+", "-", f"{a.tandemkit}"),
-                           {"kind": "stress", "title": f"TandemKit stress: Trio {a.trio} + TandemKit {a.tandemkit}",
-                            "seed": self.seed, "deadline": dt.datetime.fromtimestamp(self.deadline).isoformat(
-                                timespec="seconds"), "args": {k: v for k, v in vars(a).items() if k != "fn"}})
+        reuse = getattr(a, "build", None)
+        own = {k: v for k, v in vars(a).items() if k != "fn"}
+        if reuse:
+            self.run = open_run(Path(reuse))
+            meta = self.run.meta
+            self.run.update_meta(seed=self.seed, status="running", args={**(meta.get("args") or {}), **own})
+        else:
+            self.run = new_run("stress-" + re.sub(r"[^\w.-]+", "-", f"{a.tandemkit}"),
+                               {"kind": "stress", "title": f"TandemKit stress: Trio {a.trio} + TandemKit {a.tandemkit}",
+                                "args": own, **({"seed": self.seed} if self.stress else {})})
         self.findings = Findings(self.run.path / "findings.json")
-        log(f"stress run {self.run.path} (seed {self.seed}, {self.left() / 60:.0f} min budget, cache {CACHE_DIR})")
+        log(f"{'stress run' if self.stress else 'build'} {self.run.path} (cache {CACHE_DIR}"
+            + (f", seed {self.seed}, {a.minutes:g} min of stress after setup)" if self.stress else ")"))
         code = EXIT_CLEAN
-        minimum = SETUP_RESERVE_S + MIN_ROUND_S + CHECK_RESERVE_S + COLLECT_RESERVE_S
+        what = f"{holder_description()} ({f'seed {self.seed}' if self.stress else 'building'})"
         try:
-            with lock.hold(CACHE_DIR / "lane.lock", f"{holder_description()} (seed {self.seed})", wait=a.wait,
-                           give_up=lambda: self.left() < minimum):
+            with lock.hold(CACHE_DIR / "lane.lock", what, wait=a.wait):
                 try:
-                    self.prepare_faketandem()
-                    app, bundle_id = self.checkout_and_build()
-                    if self.left() < SETUP_RESERVE_S + MIN_ROUND_S + CHECK_RESERVE_S + COLLECT_RESERVE_S:
-                        raise _Stop("built-only", f"built with {self.left() / 60:.0f} min left: not enough to run a "
-                                                  "round. The next run starts from a warm build.", EXIT_CLEAN)
-                    self.start_faketandem()
-                    self.install_and_seed(app, bundle_id)
-                    self.launch(bundle_id)
-                    self.bring_up_ui()
-                    from . import recovery
-                    ok, st = recovery.wait_for_session(self.fk.client, a.session_timeout + 60)
-                    if not ok:
-                        self.findings.add(Finding(
-                            kind="no-recovery", title="TandemKit never connected to faketandem after launch",
-                            signature=["initial-session"], component="TandemKit",
-                            details=f"faketandem state: {st}\nThe pump was seeded as paired (PumpManagerState.plist) "
-                                    "with the key faketandem holds; see tandemkit-oslog.txt and faketandem.log."))
-                        raise _Stop("no-initial-session", "TandemKit never connected; no rounds run", EXIT_FINDINGS)
-                    self.run.log_step("connected", "TandemKit authenticated with faketandem")
-                    self.rounds_loop()
-                    self.status = "completed"
+                    app, bundle_id = self.load_build() if reuse else self.build_phase()
+                    if self.stress:
+                        self.stress_phase(app, bundle_id)
+                    self.status = "completed" if self.stress else "built"
                 except _Stop as s:
                     self.status, self.note, code = s.status, s.note, s.code
                 finally:
-                    self.collect()
+                    if self.stress:
+                        self.collect()
         except LaneBusy as e:
             self.status, self.note, code = "busy", f"Not run: {e}.", EXIT_BUSY
             log(str(e))
         except HarnessError as e:
             self.status, self.note, code = "harness-error", f"{type(e).__name__}: {e}", EXIT_HARNESS
-            log(f"stress run failed in the harness: {e}")
+            log(f"{'stress run' if self.stress else 'build'} failed in the harness: {e}")
         if code == EXIT_CLEAN and any(f.kind in FAILURE_KINDS for f in self.findings):
             code = EXIT_FINDINGS
         self.findings.save()
         text = self.summary(code)
         (self.run.path / "summary.md").write_text(text)
-        result = {"status": self.status, "exit_code": code, "run_dir": str(self.run.path), "seed": self.seed,
-                  "findings": len(self.findings), "kinds": sorted({f.kind for f in self.findings}),
-                  "rounds": len(self.rounds)}
+        result = {"status": self.status, "exit_code": code, "run_dir": str(self.run.path),
+                  "findings": len(self.findings), "kinds": sorted({f.kind for f in self.findings})}
+        if self.stress:
+            result.update(seed=self.seed, rounds=len(self.rounds))
         (self.run.path / "result.json").write_text(json.dumps(result, indent=2))
         if a.result_json:
             Path(a.result_json).write_text(json.dumps(result, indent=2))
@@ -502,7 +569,7 @@ def keep_awake() -> None:
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def cmd_run(args) -> int:
+def _lane_with_issues(args) -> int:
     from . import issues
     repo = None
     if args.file_issues:
@@ -521,33 +588,52 @@ def cmd_run(args) -> int:
     return code
 
 
-def add_run_arguments(p) -> None:
-    p.add_argument("--trio", default=DEFAULT_TRIO, help=f"Trio branch spec (default {DEFAULT_TRIO})")
-    p.add_argument("--tandemkit", default=DEFAULT_TANDEMKIT,
+def cmd_run(args) -> int:
+    if args.build and args.app:
+        raise HarnessError("--build and --app both name the app to stress; pass one")
+    return _lane_with_issues(args)
+
+
+def cmd_build(args) -> int:
+    return _lane_with_issues(args)
+
+
+def add_build_arguments(p) -> None:
+    g = p.add_argument_group("build (with `run --build`, taken from that build instead)")
+    g.add_argument("--trio", default=DEFAULT_TRIO, help=f"Trio branch spec (default {DEFAULT_TRIO})")
+    g.add_argument("--tandemkit", default=DEFAULT_TANDEMKIT,
                    help="TandemKit ref for Trio's submodule: a branch or sha, owner/repo@branch, or a PR (default dev)")
-    p.add_argument("--faketandem-ref", default=None, help="faketandem branch/tag/sha (default FAKETANDEM_REF, main)")
-    p.add_argument("--app", help="a Trio.app already built with TANDEMKIT_VIRTUAL_PUMP: skip checkout and build")
-    p.add_argument("--minutes", type=float, default=60,
-                   help="whole-run budget from now, build included (default 60; the nightly job runs 360)")
-    p.add_argument("--deadline", help="end of the run as epoch seconds (overrides --minutes); CI passes its job limit")
-    p.add_argument("--no-enforce-deadline", dest="enforce_deadline", action="store_false",
-                   help="let the build run past the deadline instead of stopping it")
-    p.add_argument("--round-minutes", type=float, default=4, help="chaos per round before each recovery check")
-    p.add_argument("--seed", type=int, help="seed for the chaos plan (default: random, printed and recorded)")
-    p.add_argument("--intensity", choices=["cycle", "low", "medium", "high"], default="cycle",
-                   help="gap between actions; cycle (default) alternates medium, high, low, high by round")
-    p.add_argument("--categories", help="comma-separated subset of pump,link,app,ui (default all available)")
-    p.add_argument("--sanitizer", choices=["thread", "address", "none"], default="thread")
-    p.add_argument("--main-thread-checker", action="store_true", help="inject Xcode's libMainThreadChecker.dylib")
-    p.add_argument("--no-ui", action="store_true", help="no WebDriverAgent: pump, link and app chaos only")
-    p.add_argument("--keep-installed", action="store_true", help="keep the app's data container from an earlier run")
-    p.add_argument("--session-timeout", type=float, default=120, help="seconds to wait for a re-authenticated session")
-    p.add_argument("--probe-timeout", type=float, default=60, help="seconds to wait for the probe's request")
-    p.add_argument("--hang-seconds", type=float, default=45, help="an accessibility query slower than this is a hang")
+    g.add_argument("--faketandem-ref", default=None, help="faketandem branch/tag/sha (default FAKETANDEM_REF, main)")
+    g.add_argument("--sanitizer", choices=["thread", "address", "none"], default="thread")
+    g.add_argument("--build-minutes", type=float,
+                   help="stop xcodebuild after this many minutes (exit 5, status build-incomplete; the next build "
+                        "continues from DerivedData). Default: no limit")
     p.add_argument("--wait", action="store_true",
                    help="wait for another stress run on this machine (by hand or CI) instead of exiting with 4")
     p.add_argument("--file-issues", action="store_true",
-                   help="file findings and build breaks as issues through `gh` (checked before the run starts)")
+                   help="file findings and build breaks as issues through `gh` (checked before anything starts)")
     p.add_argument("--issues-repo", help="owner/repo for --file-issues (default TKSTRESS_ISSUES_REPO, else this "
                                          "checkout's origin)")
     p.add_argument("--result-json", help="also write result.json here")
+
+
+def add_run_arguments(p) -> None:
+    add_build_arguments(p)
+    g = p.add_argument_group("stress")
+    g.add_argument("--minutes", type=float, default=60,
+                   help="minutes of stress, from the first round: the build, setup and collection are not counted "
+                        "(default 60; the nightly job runs 360)")
+    g.add_argument("--build", metavar="RUN_DIR", help="stress the build `tandemkit-stress build` made in RUN_DIR, "
+                                                       "and add this run's results to that directory")
+    g.add_argument("--app", help="a Trio.app already built with TANDEMKIT_VIRTUAL_PUMP: skip checkout and build")
+    g.add_argument("--round-minutes", type=float, default=4, help="chaos per round before each recovery check")
+    g.add_argument("--seed", type=int, help="seed for the chaos plan (default: random, printed and recorded)")
+    g.add_argument("--intensity", choices=["cycle", "low", "medium", "high"], default="cycle",
+                   help="gap between actions; cycle (default) alternates medium, high, low, high by round")
+    g.add_argument("--categories", help="comma-separated subset of pump,link,app,ui (default all available)")
+    g.add_argument("--main-thread-checker", action="store_true", help="inject Xcode's libMainThreadChecker.dylib")
+    g.add_argument("--no-ui", action="store_true", help="no WebDriverAgent: pump, link and app chaos only")
+    g.add_argument("--keep-installed", action="store_true", help="keep the app's data container from an earlier run")
+    g.add_argument("--session-timeout", type=float, default=120, help="seconds to wait for a re-authenticated session")
+    g.add_argument("--probe-timeout", type=float, default=60, help="seconds to wait for the probe's request")
+    g.add_argument("--hang-seconds", type=float, default=45, help="an accessibility query slower than this is a hang")

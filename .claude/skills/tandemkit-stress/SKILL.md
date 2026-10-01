@@ -10,13 +10,14 @@ Run commands from the tandemkit-stress checkout (`./setup.sh` once). Full descri
 ## Run
 | Want | Command |
 |---|---|
-| The nightly configuration (closed-beta Trio + TandemKit dev, TSan, intensity cycling) | `./tandemkit-stress run --minutes 360` (default budget 60 min, build included) |
+| The nightly configuration (closed-beta Trio + TandemKit dev, TSan, intensity cycling) | `./tandemkit-stress run --minutes 360` (build first, then `--minutes` of stress; default 60) |
+| Only build, or stress a build made earlier | `./tandemkit-stress build [--build-minutes 120]` · `./tandemkit-stress run --build runs/<run>` |
 | On a Mac without Actions, filing issues with the local `gh` login | add `--file-issues` (checks `gh` first; repo: this checkout's origin) |
 | Shorter / reproducible / harsher | `./tandemkit-stress run --minutes 25 --seed 42 --intensity high` |
 | A TandemKit branch or PR | `--tandemkit my-branch` · `--tandemkit jwoglom/TandemKit#470` |
 | Skip checkout + build (an app already built with the virtual pump) | `--app <path to Trio.app>` |
 | Only some chaos | `--categories pump,link` (also `app`, `ui`); `--no-ui` skips WebDriverAgent |
-| In CI | `gh workflow run stress-sim-manual.yml -R jwoglom/tandemkit-stress -f tandemkit=… -f seed=… [-f minutes=240]` (default 60) |
+| In CI | `gh workflow run stress-sim-manual.yml -R jwoglom/tandemkit-stress -f tandemkit=… -f seed=… [-f minutes=240] [-f build_minutes=180]` |
 
 One stress run per machine: a lock in the build cache covers runs started by hand and CI jobs alike. A run that
 finds it held exits with 4 and names the holder; `--wait` queues instead. The lane uses its own simulator
@@ -34,8 +35,8 @@ plus `FAKETANDEM_JAR`. `./tandemkit-stress doctor` checks all of this.
   - `logs/tandem_log.txt`.
   - `faketandem.log`.
   - `faketandem-requests.jsonl`: every message the pump saw, with sequence numbers.
-- Exit code and `result.json` status: 0 clean or built-only, 1 findings, 2 harness failure, 3 Trio does not build,
-  4 lane busy.
+- Exit code and `result.json` status: 0 clean or built, 1 findings, 2 harness failure, 3 Trio does not build,
+  4 lane busy, 5 build stopped at `--build-minutes` (nothing tested).
 
 ## Triage a finding
 1. `./tandemkit-stress scan <stderr|.ips|sample file> -v` prints the finding(s) and the frames the fingerprint uses.

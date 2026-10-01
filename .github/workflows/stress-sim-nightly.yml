@@ -1,5 +1,6 @@
-# Six hours of the simulator stress job (stress-sim-job.yml) every night from 02:00 New York time: closed-beta Trio
-# with TandemKit dev, ThreadSanitizer, cycling intensity, issues filed for findings.
+# The simulator stress job (stress-sim-job.yml) every night from 02:00 New York time: a build of closed-beta Trio
+# with TandemKit dev and ThreadSanitizer (up to two hours), then six hours of stress at cycling intensity, issues
+# filed for findings.
 name: Stress nightly (6 h)
 
 on:
@@ -21,7 +22,8 @@ jobs:
     uses: ./.github/workflows/stress-sim-job.yml
     with:
       minutes: 360
-      timeout_minutes: 375
+      build_minutes: 120
+      timeout_minutes: 525
     secrets:
       TRIO_E2E_APP_ID: ${{ secrets.TRIO_E2E_APP_ID }}
       TRIO_E2E_APP_KEY: ${{ secrets.TRIO_E2E_APP_KEY }}
