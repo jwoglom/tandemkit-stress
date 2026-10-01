@@ -1,0 +1,81 @@
+# A one-hour run of the simulator stress job (stress-sim-job.yml), started by hand: a TandemKit branch or PR, a seed
+# to reproduce, another intensity or chaos mix.
+#   gh workflow run stress-sim-manual.yml -R jwoglom/tandemkit-stress -f tandemkit=jwoglom/TandemKit#470 -f seed=42
+name: Stress manual (1 h)
+run-name: "stress (1 h): TandemKit ${{ inputs.tandemkit }}${{ inputs.seed && format(' seed {0}', inputs.seed) || '' }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      tandemkit:
+        description: "TandemKit ref for the submodule: branch, sha, owner/repo@branch or a PR"
+        type: string
+        default: dev
+      trio:
+        description: "Trio branch spec"
+        type: string
+        default: "nightscout/Trio:feat/tandem-closed-beta"
+      minutes:
+        description: "Run budget in minutes, build included (at most 60)"
+        type: number
+        default: 60
+      seed:
+        description: "Chaos seed (blank: random)"
+        type: string
+      intensity:
+        description: "Chaos intensity"
+        type: choice
+        options: [cycle, medium, high, low]
+        default: cycle
+      sanitizer:
+        description: "Sanitizer"
+        type: choice
+        options: [thread, address, none]
+        default: thread
+      categories:
+        description: "Chaos categories (comma-separated subset of pump,link,app,ui; blank: all)"
+        type: string
+      faketandem_ref:
+        description: "faketandem branch/tag/sha (blank: main)"
+        type: string
+      harness_ref:
+        description: "trio-test-harness ref (blank: the commit the submodule pins)"
+        type: string
+      file_issues:
+        description: "File issues for findings"
+        type: boolean
+        default: true
+      xcode:
+        description: "Xcode"
+        type: choice
+        options: ["26.2"]
+        default: "26.2"
+
+permissions:
+  contents: read
+  issues: write
+
+# Shared with stress-sim-nightly.yml: both use the same simulator and build cache on the runner.
+concurrency:
+  group: stress-sim
+  cancel-in-progress: false
+
+jobs:
+  stress:
+    uses: ./.github/workflows/stress-sim-job.yml
+    with:
+      minutes: ${{ inputs.minutes }}
+      timeout_minutes: 75
+      tandemkit: ${{ inputs.tandemkit }}
+      trio: ${{ inputs.trio }}
+      seed: ${{ inputs.seed }}
+      intensity: ${{ inputs.intensity }}
+      sanitizer: ${{ inputs.sanitizer }}
+      categories: ${{ inputs.categories }}
+      faketandem_ref: ${{ inputs.faketandem_ref }}
+      harness_ref: ${{ inputs.harness_ref }}
+      file_issues: ${{ inputs.file_issues }}
+      xcode: ${{ inputs.xcode }}
+    secrets:
+      TRIO_E2E_APP_ID: ${{ secrets.TRIO_E2E_APP_ID }}
+      TRIO_E2E_APP_KEY: ${{ secrets.TRIO_E2E_APP_KEY }}

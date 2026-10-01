@@ -1,0 +1,76 @@
+# The lane's parts that run without Xcode (detectors, seeding, chaos scheduling, issue bodies), plus the faketandem
+# client against the emulator's current default branch, on a hosted runner. The stress run itself needs the
+# self-hosted Macs (stress-sim-job.yml).
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pinned trio-test-harness commit
+        id: pin
+        run: echo "ref=$(git ls-tree HEAD trio-test-harness | awk '{print $3}')" >> "$GITHUB_OUTPUT"
+
+      - name: GitHub App token (jwoglom)
+        id: token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.TRIO_E2E_APP_ID }}
+          private-key: ${{ secrets.TRIO_E2E_APP_KEY }}
+          owner: jwoglom
+          repositories: trio-test-harness
+
+      - name: Checkout trio-test-harness
+        uses: actions/checkout@v4
+        with:
+          repository: jwoglom/trio-test-harness
+          ref: ${{ steps.pin.outputs.ref }}
+          path: trio-test-harness
+          token: ${{ steps.token.outputs.token }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Checkout faketandem
+        uses: actions/checkout@v4
+        with:
+          repository: jwoglom/faketandem
+          path: faketandem
+
+      - name: Build faketandem and fetch the pumpX2 cliparser jar
+        working-directory: faketandem
+        run: |
+          set -euo pipefail
+          go build -o faketandem .
+          make jar
+          echo "FAKETANDEM_BIN=$PWD/faketandem" >> "$GITHUB_ENV"
+          echo "FAKETANDEM_JAR=$(ls "$PWD"/third_party/pumpx2-cliparser-*.jar | tail -1)" >> "$GITHUB_ENV"
+
+      - name: Unit tests (with a live faketandem)
+        run: |
+          set -euo pipefail
+          python -m venv .venv
+          .venv/bin/pip install --quiet -r requirements.txt
+          .venv/bin/python -m unittest discover -s tests -v

@@ -1,0 +1,195 @@
+# The simulator stress job: Trio (nightscout/Trio feat/tandem-closed-beta) with its TandemKit submodule moved to
+# TandemKit dev, built with the virtual pump and ThreadSanitizer, on the iOS Simulator against faketandem, while
+# `tandemkit-stress run` injects pump-side events, link faults and app kills (docs/lane.md). Findings become issues in
+# this repository: one per fingerprint, a repeat comments on the open issue.
+# It has no trigger of its own: stress-sim-nightly.yml (6 hours from 02:00 New York time) and stress-sim-manual.yml
+# (1 hour, on demand) call it.
+name: Stress job
+
+on:
+  workflow_call:
+    inputs:
+      minutes:
+        description: "Run budget in minutes, build included (at most timeout_minutes - 15)"
+        type: number
+        required: true
+      timeout_minutes:
+        description: "The job's limit; the last 15 minutes are kept for issues and artifacts"
+        type: number
+        required: true
+      trio:
+        type: string
+        default: "nightscout/Trio:feat/tandem-closed-beta"
+      tandemkit:
+        type: string
+        default: dev
+      faketandem_ref:
+        type: string
+        default: ""
+      harness_ref:
+        type: string
+        default: ""
+      seed:
+        type: string
+        default: ""
+      intensity:
+        type: string
+        default: cycle
+      sanitizer:
+        type: string
+        default: thread
+      categories:
+        type: string
+        default: ""
+      file_issues:
+        type: boolean
+        default: true
+      xcode:
+        type: string
+        default: "26.2"
+    secrets:
+      TRIO_E2E_APP_ID:
+        required: true
+      TRIO_E2E_APP_KEY:
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  stress:
+    runs-on: [self-hosted, macOS, worker]
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    env:
+      # Inputs reach scripts only through env, never interpolated into them.
+      IN_TRIO: ${{ inputs.trio || 'nightscout/Trio:feat/tandem-closed-beta' }}
+      IN_TANDEMKIT: ${{ inputs.tandemkit || 'dev' }}
+      IN_FAKETANDEM_REF: ${{ inputs.faketandem_ref }}
+      IN_SEED: ${{ inputs.seed }}
+      IN_INTENSITY: ${{ inputs.intensity || 'cycle' }}
+      IN_SANITIZER: ${{ inputs.sanitizer || 'thread' }}
+      IN_CATEGORIES: ${{ inputs.categories }}
+      TH_XCODE_APP: /Applications/Xcode_${{ inputs.xcode || '26.2' }}.app
+      TH_SIM_DEVICE: iPhone 17
+      TH_TRIO_ORIGIN: nightscout/Trio
+      TH_TRIO_REFERENCE: /Volumes/work/mirrors/nightscout/Trio.git
+      TH_GIT_MIRRORS: /Volumes/work/mirrors
+      TH_WDA_PREBUILT: /Volumes/work/cache/wda/current
+    steps:
+      # The run's deadline counts from here, leaving the end of the job for issues and artifacts.
+      - name: Start the clock
+        env:
+          IN_MINUTES: ${{ inputs.minutes }}
+          JOB_MINUTES: ${{ inputs.timeout_minutes }}
+        run: |
+          cap=$(( JOB_MINUTES - 15 ))
+          minutes=$cap
+          if [[ "$IN_MINUTES" =~ ^[0-9]+$ ]] && (( 10#$IN_MINUTES > 0 && 10#$IN_MINUTES < cap )); then minutes=$(( 10#$IN_MINUTES )); fi
+          echo "run budget: $minutes minutes"
+          echo "STRESS_DEADLINE=$(( $(date +%s) + minutes * 60 ))" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+
+      - name: Pinned trio-test-harness commit
+        id: pin
+        env:
+          HARNESS_REF: ${{ inputs.harness_ref }}
+        run: echo "ref=${HARNESS_REF:-$(git ls-tree HEAD trio-test-harness | awk '{print $3}')}" >> "$GITHUB_OUTPUT"
+
+      # Contents: read on jwoglom/trio-test-harness (the submodule) and jwoglom/TandemKit (Trio's submodule). An App
+      # token lasts an hour: the lane fetches everything it needs from GitHub in its first minutes.
+      - name: GitHub App token (jwoglom)
+        id: token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.TRIO_E2E_APP_ID }}
+          private-key: ${{ secrets.TRIO_E2E_APP_KEY }}
+          owner: jwoglom
+          repositories: trio-test-harness,TandemKit
+
+      - name: Checkout trio-test-harness
+        uses: actions/checkout@v4
+        with:
+          repository: jwoglom/trio-test-harness
+          ref: ${{ steps.pin.outputs.ref }}
+          path: trio-test-harness
+          token: ${{ steps.token.outputs.token }}
+
+      - name: Python environment
+        run: |
+          set -euo pipefail
+          uv venv --quiet .venv
+          uv pip install --quiet --python .venv/bin/python -r requirements.txt -r trio-test-harness/requirements.txt
+
+      - name: Unit tests
+        run: .venv/bin/python -m unittest discover -s tests
+
+      # faketandem is Go; it runs pumpX2's cliparser (Java 17+) for message parsing.
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Stress run
+        id: stress
+        env:
+          TH_GIT_TOKEN: ${{ steps.token.outputs.token }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -uo pipefail
+          args=(--trio "$IN_TRIO" --tandemkit "$IN_TANDEMKIT" --deadline "$STRESS_DEADLINE"
+                --intensity "$IN_INTENSITY" --sanitizer "$IN_SANITIZER" --result-json "$RUNNER_TEMP/stress-result.json")
+          [ -z "$IN_FAKETANDEM_REF" ] || args+=(--faketandem-ref "$IN_FAKETANDEM_REF")
+          [ -z "$IN_SEED" ] || args+=(--seed "$IN_SEED")
+          [ -z "$IN_CATEGORIES" ] || args+=(--categories "$IN_CATEGORIES")
+          rc=0
+          ./tandemkit-stress run "${args[@]}" || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          run_dir=$(.venv/bin/python -c 'import json,sys; print(json.load(open(sys.argv[1]))["run_dir"])' \
+                    "$RUNNER_TEMP/stress-result.json" 2>/dev/null || true)
+          echo "run_dir=$run_dir" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      # 1: findings, 3: Trio does not build against this TandemKit. A confirmed driver bug is promoted to TandemKit by
+      # a person; nothing is filed there from here.
+      - name: File issues
+        if: always() && inputs.file_issues && steps.stress.outputs.run_dir != '' && (steps.stress.outputs.rc == '1' || steps.stress.outputs.rc == '3')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_DIR: ${{ steps.stress.outputs.run_dir }}
+        run: ./tandemkit-stress file-issues "$RUN_DIR" --repo "$GITHUB_REPOSITORY"
+
+      - name: Job summary
+        if: always() && steps.stress.outputs.run_dir != ''
+        env:
+          RUN_DIR: ${{ steps.stress.outputs.run_dir }}
+        run: cat "$RUN_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload run (findings, logs, crash reports, faketandem request log)
+        if: always() && steps.stress.outputs.run_dir != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: tandemkit-stress-${{ github.run_id }}
+          path: ${{ steps.stress.outputs.run_dir }}
+          retention-days: 14
+
+      - name: Result
+        if: always()
+        env:
+          RC: ${{ steps.stress.outputs.rc }}
+        run: |
+          case "${RC:-2}" in
+            0) echo "clean (or built without time left to run; see the summary)" ;;
+            1) echo "::error title=Stress findings::see the job summary and the issues filed"; exit 1 ;;
+            3) echo "::error title=Build break::Trio does not build against this TandemKit"; exit 1 ;;
+            4) echo "::warning title=Not run::another stress run on this runner's Mac held the lane; see the job summary" ;;
+            *) echo "::error title=Harness error::the stress run did not complete; see the step log"; exit 1 ;;
+          esac
