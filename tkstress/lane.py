@@ -50,6 +50,7 @@ SETUP_RESERVE_S = 8 * 60        # simulator boot, install, launch, WDA, CGM
 CHECK_RESERVE_S = 4 * 60        # one quiesce + recovery check at its slowest
 COLLECT_RESERVE_S = 3 * 60      # stopping everything, crash reports, summary
 MIN_ROUND_S = 60
+AFTER_BUILD_S = SETUP_RESERVE_S + MIN_ROUND_S + CHECK_RESERVE_S + COLLECT_RESERVE_S
 # --intensity cycle: rounds alternate, so a long run sees the driver both flooded and given room to settle
 INTENSITY_CYCLE = ["medium", "high", "low", "high"]
 
@@ -84,7 +85,8 @@ def tandemkit_spec(ref: str) -> str:
 
 def build_failure(errors: str, trio: str, tandemkit: str) -> Finding:
     """One issue per distinct break: keyed on the first compiler error with paths and line numbers removed."""
-    first = next((l for l in errors.splitlines() if "error:" in l), errors.strip().splitlines()[0] if errors.strip() else "")
+    first = next((l for l in errors.splitlines() if re.search(r"(?:^|: )error: ", l)),
+                 errors.strip().splitlines()[0] if errors.strip() else "")
     norm = re.sub(r"(/[^\s:]+/)", "", first)
     norm = re.sub(r":\d+(:\d+)?", "", norm).strip()
     return Finding(kind="build", title=f"Trio ({trio}) does not build against TandemKit {tandemkit}"[:200],
@@ -107,6 +109,7 @@ class Lane:
         self.rounds: list[dict] = []
         self.status = "running"
         self.note = ""
+        self.build_only = ""
         self.req_seq = 0
 
     def left(self) -> float:
@@ -125,14 +128,20 @@ class Lane:
         src, info = B.prepare_source(branch=a.trio, submodules=[tandemkit_spec(a.tandemkit)])
         self.run.update_meta(git={k: info.get(k) for k in ("branch", "sha", "describe", "submodules",
                                                             "submodule_overrides")})
-        budget = self.left() - SETUP_RESERVE_S - MIN_ROUND_S - CHECK_RESERVE_S - COLLECT_RESERVE_S
+        budget = self.left() - AFTER_BUILD_S
+        if budget < 60:
+            budget = self.left() - COLLECT_RESERVE_S
+            self.build_only = (f"A {(self.deadline - self.t0) / 60:.0f}-minute budget leaves no room for a round after "
+                               f"the build, which needs {AFTER_BUILD_S // 60} more minutes (setup, one round, the "
+                               "recovery check, collection), so this run only builds, warming the cache for the next.")
+            log(self.build_only)
         try:
             bi = B.build(src, "sim", configuration="Debug", git_info=info, log_path=self.run.path / "xcodebuild.log",
                          conditions=("TANDEMKIT_VIRTUAL_PUMP",), sanitizer=None if a.sanitizer == "none" else a.sanitizer,
                          save=False, timeout=max(budget, 60) if a.enforce_deadline else None)
         except B.BuildTimeout as e:
-            raise _Stop("build-incomplete", f"{e}. Not a failure: the next run continues from DerivedData.",
-                        EXIT_CLEAN) from None
+            raise _Stop("build-incomplete", f"{e}. Not a failure: the next run continues from DerivedData. "
+                        f"{self.build_only}".strip(), EXIT_CLEAN) from None
         except HarnessError as e:
             self.findings.add(build_failure(str(e), a.trio, a.tandemkit))
             raise _Stop("build-failed", "Trio did not build against this TandemKit", EXIT_BUILD) from None
@@ -436,16 +445,16 @@ class Lane:
         self.findings = Findings(self.run.path / "findings.json")
         log(f"stress run {self.run.path} (seed {self.seed}, {self.left() / 60:.0f} min budget, cache {CACHE_DIR})")
         code = EXIT_CLEAN
-        minimum = SETUP_RESERVE_S + MIN_ROUND_S + CHECK_RESERVE_S + COLLECT_RESERVE_S
+        minimum = AFTER_BUILD_S
         try:
             with lock.hold(CACHE_DIR / "lane.lock", f"{holder_description()} (seed {self.seed})", wait=a.wait,
                            give_up=lambda: self.left() < minimum):
                 try:
                     self.prepare_faketandem()
                     app, bundle_id = self.checkout_and_build()
-                    if self.left() < SETUP_RESERVE_S + MIN_ROUND_S + CHECK_RESERVE_S + COLLECT_RESERVE_S:
-                        raise _Stop("built-only", f"built with {self.left() / 60:.0f} min left: not enough to run a "
-                                                  "round. The next run starts from a warm build.", EXIT_CLEAN)
+                    if self.left() < AFTER_BUILD_S:
+                        raise _Stop("built-only", self.build_only or f"built with {self.left() / 60:.0f} min left: "
+                                    "not enough to run a round. The next run starts from a warm build.", EXIT_CLEAN)
                     self.start_faketandem()
                     self.install_and_seed(app, bundle_id)
                     self.launch(bundle_id)

@@ -102,7 +102,9 @@ workflow with no trigger of its own; both of them call it.
 | `stress-sim-manual.yml` | `workflow_dispatch`, with inputs for the TandemKit ref, seed, intensity, sanitizer and chaos categories | `minutes`: 60 by default, up to 1425 | `minutes` + 15 |
 
 - **Time budget.** The run's deadline counts from the start of the job, build included, and the last 15 minutes of
-  the job are kept for issues and artifacts. The build is stopped at whatever leaves time for setup and one round.
+  the job are kept for issues and artifacts. The build is stopped at whatever leaves time for setup and one round
+  (16 minutes). A budget with no room for that gives the build all of it instead, to warm the cache for the next
+  run, and the summary says so.
   After a warm build, the nightly run gets about 75 rounds at 4 minutes each, and an hour-long manual run about 10.
   The manual workflow works out its job limit in a short `plan` job on a hosted runner, since expressions cannot
   add. The 1425-minute ceiling keeps the job inside the 24 hours its `GITHUB_TOKEN` lasts, which it needs at the

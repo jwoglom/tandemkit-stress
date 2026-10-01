@@ -17,7 +17,7 @@ on:
         type: string
         default: "nightscout/Trio:feat/tandem-closed-beta"
       minutes:
-        description: "Run budget in minutes, build included (1 to 1425)"
+        description: "Run budget in minutes, build included (1 to 1425; after the build, 16 go to setup and checks, so a shorter run only builds)"
         type: number
         default: 60
       seed:

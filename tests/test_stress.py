@@ -251,6 +251,12 @@ class Issues(unittest.TestCase):
         self.assertIn("`runs/20261001-020000-stress-dev`", line)
         self.assertNotIn("/somewhere", line)
 
+    def test_build_failure_skips_quoted_source_lines(self):
+        from tkstress.lane import build_failure
+        f = build_failure("xcodebuild failed. Errors:\n    public private (set) var error: Error?\n"
+                          "/a/TandemKit/X.swift:10:5: error: cannot find 'foo' in scope", "t", "dev")
+        self.assertIn("cannot find 'foo' in scope", f.signature[0])
+
     def test_build_failure_fingerprint_ignores_paths_and_lines(self):
         from tkstress.lane import build_failure
         a = build_failure("/Users/a/Trio/TandemKit/X.swift:10:5: error: cannot find 'foo' in scope", "t", "dev")
@@ -298,6 +304,31 @@ class Lane(unittest.TestCase):
             result = json.loads(next(Path(d).glob("*/result.json")).read_text())
         self.assertEqual(code, L.EXIT_BUSY)
         self.assertEqual(result["status"], "busy")
+
+    def test_a_budget_too_short_for_a_round_gives_the_build_all_of_it(self):
+        from unittest import mock
+        from harness import build as B
+        from harness.config import CONFIG
+        from tkstress import lane as L
+        from tkstress.cli import build_parser
+        from tkstress.detect import Findings
+        args = build_parser().parse_args(["run", "--minutes", "10"])
+        seen = {}
+
+        def fake_build(*_, timeout=None, **__):
+            seen["timeout"] = timeout
+            raise B.BuildTimeout("xcodebuild stopped after 7 min")
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(CONFIG.values, {"TH_RUNS_DIR": d}), \
+                mock.patch.object(B, "prepare_source", return_value=(Path(d), {})), \
+                mock.patch.object(B, "build", side_effect=fake_build):
+            lane = L.Lane(args)
+            lane.run = L.new_run("t", {})
+            lane.findings = Findings(lane.run.path / "findings.json")
+            with self.assertRaises(L._Stop) as cm:
+                lane.checkout_and_build()
+        self.assertAlmostEqual(seen["timeout"], 10 * 60 - L.COLLECT_RESERVE_S, delta=5)
+        self.assertEqual(cm.exception.status, "build-incomplete")
+        self.assertIn("only builds", cm.exception.note)
 
     def test_only_a_webdriveragent_this_checkout_started_counts_as_ours(self):
         from unittest import mock
