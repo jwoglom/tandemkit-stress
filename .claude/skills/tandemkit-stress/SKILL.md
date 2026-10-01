@@ -16,7 +16,7 @@ Run commands from the tandemkit-stress checkout (`./setup.sh` once). Full descri
 | A TandemKit branch or PR | `--tandemkit my-branch` · `--tandemkit jwoglom/TandemKit#470` |
 | Skip checkout + build (an app already built with the virtual pump) | `--app <path to Trio.app>` |
 | Only some chaos | `--categories pump,link` (also `app`, `ui`); `--no-ui` skips WebDriverAgent |
-| In CI, one hour | `gh workflow run stress-sim-manual.yml -R jwoglom/tandemkit-stress -f tandemkit=… -f seed=…` |
+| In CI | `gh workflow run stress-sim-manual.yml -R jwoglom/tandemkit-stress -f tandemkit=… -f seed=… [-f minutes=240]` (default 60) |
 
 One stress run per machine: a lock in the build cache covers runs started by hand and CI jobs alike. A run that
 finds it held exits with 4 and names the holder; `--wait` queues instead. The lane uses its own simulator

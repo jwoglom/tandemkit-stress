@@ -99,11 +99,14 @@ workflow with no trigger of its own; both of them call it.
 | Workflow | Trigger | Run budget | Job limit |
 |---|---|---|---|
 | `stress-sim-nightly.yml` | 02:00 America/New_York every night (the schedule's `timezone`, so it follows daylight saving) | 360 minutes | 375 minutes |
-| `stress-sim-manual.yml` | `workflow_dispatch`, with inputs for the TandemKit ref, seed, intensity, sanitizer and chaos categories | 60 minutes (`minutes`, at most 60) | 75 minutes |
+| `stress-sim-manual.yml` | `workflow_dispatch`, with inputs for the TandemKit ref, seed, intensity, sanitizer and chaos categories | `minutes`: 60 by default, up to 1425 | `minutes` + 15 |
 
 - **Time budget.** The run's deadline counts from the start of the job, build included, and the last 15 minutes of
   the job are kept for issues and artifacts. The build is stopped at whatever leaves time for setup and one round.
-  After a warm build, the nightly run gets about 75 rounds at 4 minutes each, and the manual run about 10.
+  After a warm build, the nightly run gets about 75 rounds at 4 minutes each, and an hour-long manual run about 10.
+  The manual workflow works out its job limit in a short `plan` job on a hosted runner, since expressions cannot
+  add. The 1425-minute ceiling keeps the job inside the 24 hours its `GITHUB_TOKEN` lasts, which it needs at the
+  end to file issues.
 - **One at a time.** Both workflows share the `stress-sim` concurrency group: a manual run started during the
   nightly waits for it, and the other way round. GitHub keeps only one waiting run per group, so a second manual
   run started while one waits replaces it.
@@ -111,7 +114,7 @@ workflow with no trigger of its own; both of them call it.
   lane lock does. A job that finds the lane held exits with 4, which the workflow reports as a warning.
 - **Persistent cache.** `TRIO_REPO`, `TH_DERIVED_DATA` and `TH_BUILD_DIR` live in the lane's cache, which survives
   between jobs: `/Volumes/work/cache/tandemkit-stress` where that volume is writable, else
-  `~/Library/Caches/tandemkit-stress`. A warm build is incremental (usually only TandemKit changed). A cold one with TSan can use up a manual run's hour, and is
+  `~/Library/Caches/tandemkit-stress`. A warm build is incremental (usually only TandemKit changed). A cold one with TSan can use up an hour-long manual run, and is
   reported as `build-incomplete` or `built-only` when it does; the next run starts warm.
 - **Checkouts and tokens.** This repository is checked out with the job's own token. trio-test-harness is checked
   out at the commit the submodule pins (or `harness_ref`), and Trio's TandemKit submodule is fetched, with a GitHub
