@@ -4,16 +4,19 @@
 Trio, by putting the driver under load and breaking its link on purpose. It builds Trio with its TandemKit
 submodule moved to TandemKit `dev` (or any ref or PR), compiled with `TANDEMKIT_VIRTUAL_PUMP` and ThreadSanitizer.
 The app runs on the iOS Simulator against [faketandem](https://github.com/jwoglom/faketandem), the Go Tandem pump
-emulator. Seeded chaos then runs for the rest of the time budget: pump-side events, link faults, app kills and UI
-noise, each round ending in a check that the driver came back. Only simulated devices are involved.
+emulator. Seeded chaos then runs for `--minutes`: pump-side events, link faults, app kills and UI noise, each round
+ending in a check that the driver came back. The build is a stage of its own (`build`, CI's first step), and the
+stress clock starts at the first round: neither the build nor the simulator setup counts against `--minutes`. Only simulated devices are involved.
 
 ```
-./tandemkit-stress run                                     # closed-beta Trio + TandemKit dev, 60 min budget
+./tandemkit-stress run                                     # build closed-beta Trio + TandemKit dev, then 60 min of stress
 ./tandemkit-stress run --minutes 360                       # the nightly job's length
 ./tandemkit-stress run --minutes 360 --file-issues         # the same by hand, filing through your `gh` login
 ./tandemkit-stress run --minutes 25 --seed 42 --intensity high
 ./tandemkit-stress run --tandemkit jwoglom/TandemKit#470   # a TandemKit PR
 ./tandemkit-stress run --app <Trio.app> --minutes 15       # reuse a virtual-pump build, skip checkout + build
+./tandemkit-stress build --build-minutes 120               # only the build, into a new run directory
+./tandemkit-stress run --build runs/<run> --minutes 30     # stress that run directory's build
 ./tandemkit-stress file-issues runs/<run>                  # one GitHub issue per new finding
 ./tandemkit-stress scan app/launch-03.stderr crashes/*.ips # triage: the findings in sanitizer output / crash reports
 ./tandemkit-stress faketandem --paired                     # the emulator alone, for poking at it by hand
@@ -24,8 +27,7 @@ submodule, or `TKSTRESS_HARNESS_DIR`): its source checkout and `xcodebuild`, sim
 Trio UI flows. It keeps its own Trio checkout, DerivedData and build directory, so a stress build never invalidates
 the harness's normal one. These live in a cache shared by every stress run on the machine, started by hand or from
 CI (`tkstress/__init__.py`). A lock in it (`tkstress/lock.py`) lets one run at a time use the cache and the lane's
-simulator. A run that finds the lane held exits with 4 and names the holder; with `--wait`, it queues until its
-deadline.
+simulator. A run that finds the lane held exits with 4 and names the holder; with `--wait`, it queues.
 - **Issues from a hand-started run.** `--file-issues` files them at the end through the local `gh` login. `gh`'s
   access to the repository is checked before the run starts.
 - **Sleep.** The run holds a `caffeinate` assertion against idle sleep.
@@ -34,8 +36,8 @@ deadline.
 
 | Stage | What happens | Code |
 |---|---|---|
-| faketandem source | Fetched from `FAKETANDEM_REPO`@`--faketandem-ref` and built (or `FAKETANDEM_BIN` + `FAKETANDEM_JAR`), before anything long: a CI job's GitHub App token expires after an hour. | `tkstress/faketandem.py` |
-| checkout + build | `prepare_source(branch=--trio, submodules=[TandemKit@--tandemkit])`, then `xcodebuild` with `TANDEMKIT_VIRTUAL_PUMP` and `ENABLE_THREAD_SANITIZER[sdk=iphonesimulator*] = YES` in the harness xcconfig. The sanitizer is set per SDK because Trio's scheme embeds a watchOS app, which the sanitizers do not support. A stress build never touches `build/last-build.json`. Its own xcconfig is `build/override-sim-tandemkit_virtual_pump-sanitized.xcconfig`. The build is stopped at the deadline, so a CI job's limit never kills it without a report. | trio-test-harness `harness/build.py` |
+| faketandem source | Build stage. Fetched from `FAKETANDEM_REPO`@`--faketandem-ref` and built (or `FAKETANDEM_BIN` + `FAKETANDEM_JAR`), before anything long: a CI job's GitHub App token expires after an hour. | `tkstress/faketandem.py` |
+| checkout + build | `prepare_source(branch=--trio, submodules=[TandemKit@--tandemkit])`, then `xcodebuild` with `TANDEMKIT_VIRTUAL_PUMP` and `ENABLE_THREAD_SANITIZER[sdk=iphonesimulator*] = YES` in the harness xcconfig. The sanitizer is set per SDK because Trio's scheme embeds a watchOS app, which the sanitizers do not support. A stress build never touches `build/last-build.json`. Its own xcconfig is `build/override-sim-tandemkit_virtual_pump-sanitized.xcconfig`. `--build-minutes` stops it (status `build-incomplete`, not a failure: the next build continues from DerivedData), so a CI job's limit never kills it without a report. `build.json` in the run directory records the app (with its executable's size and mtime), the faketandem binary and what was built; `run --build` refuses an app that changed since. | trio-test-harness `harness/build.py` |
 | faketandem | Started on two free loopback ports. Set to `PairStep2` with a random 32-byte long-term key over its websocket. | `tkstress/faketandem.py` |
 | simulator | Its own simulator, `TandemKitStress` (`TH_SIM_NAME`), so it never reinstalls the app a trio-test-harness job is using. Fresh install, onboarding pre-seeded, and three files written into the container. `Documents/PumpManagerState.plist` holds a TandemPumpManager already paired with that key. `freeaps/freeaps_settings.json` sets closed loop and the Glucose Simulator. `preferences.json` and `settings/` set max IOB 3, SMB always, and a basal of 0.85 U/hr to match faketandem. Settings overlay the defaults bundled in the built app. | `tkstress/seed.py` |
 | launch | `simctl launch --stdout/--stderr=<run>/app/launch-NN.*` with `SIMCTL_CHILD_TANDEMKIT_VIRTUAL_PUMP=<faketandem>` and `TSAN_OPTIONS`, plus the toolchain's clang runtime directory as `DYLD_FALLBACK_LIBRARY_PATH` in case the sanitizer runtime was not embedded. TandemKit's OSLog is streamed to `tandemkit-oslog.txt`. WebDriverAgent comes up if it can, and the Glucose Simulator is added through the UI if the seeded setting did not take. A WebDriverAgent started from another harness checkout turns UI actions off: WDA always listens on port 8100, so its taps would land on that checkout's simulator. | `tkstress/app.py`, `lane.py` |
@@ -50,7 +52,7 @@ Exit codes:
 
 | Code | Meaning |
 |---|---|
-| 0 | Clean. Also used for `built-only` / `build-incomplete`: the build used the budget, and the next run starts warm. |
+| 0 | Clean, or (`build`) built. Also `build-incomplete`: the build reached `--build-minutes`, and the next build continues from DerivedData. |
 | 1 | Findings. |
 | 2 | Harness or setup failure. |
 | 3 | Trio does not build against that TandemKit. |
@@ -96,19 +98,21 @@ did not come up), the run continues with pump, link and app chaos.
 Two workflows run the lane on the self-hosted macOS workers. The job itself is `stress-sim-job.yml`, a reusable
 workflow with no trigger of its own; both of them call it.
 
-| Workflow | Trigger | Run budget | Job limit |
-|---|---|---|---|
-| `stress-sim-nightly.yml` | 02:00 America/New_York every night (the schedule's `timezone`, so it follows daylight saving) | 360 minutes | 375 minutes |
-| `stress-sim-manual.yml` | `workflow_dispatch`, with inputs for the TandemKit ref, seed, intensity, sanitizer and chaos categories | `minutes`: 60 by default, up to 1425 | `minutes` + 15 |
+| Workflow | Trigger | Build limit | Stress | Job limit |
+|---|---|---|---|---|
+| `stress-sim-nightly.yml` | 02:00 America/New_York every night (the schedule's `timezone`, so it follows daylight saving) | 120 minutes | 360 minutes | 525 minutes |
+| `stress-sim-manual.yml` | `workflow_dispatch`, with inputs for the TandemKit ref, seed, intensity, sanitizer and chaos categories | `build_minutes`, 120 by default | `minutes`, 60 by default | `build_minutes` + `minutes` + 45 |
 
-- **Time budget.** The run's deadline counts from the start of the job, build included, and the last 15 minutes of
-  the job are kept for issues and artifacts. The build is stopped at whatever leaves time for setup and one round
-  (16 minutes). A budget with no room for that gives the build all of it instead, to warm the cache for the next
-  run, and the summary says so.
-  After a warm build, the nightly run gets about 75 rounds at 4 minutes each, and an hour-long manual run about 10.
-  The manual workflow works out its job limit in a short `plan` job on a hosted runner, since expressions cannot
-  add. The 1425-minute ceiling keeps the job inside the 24 hours its `GITHUB_TOKEN` lasts, which it needs at the
-  end to file issues.
+- **Two steps.** The job's Build step runs `tandemkit-stress build --build-minutes …`, and its Stress step runs
+  `tandemkit-stress run --build <that run directory> --minutes …` only if the build finished. A build stopped at
+  its limit ends the job with a notice, not a failure, and the next run continues it from DerivedData.
+- **Time.** `minutes` is the stress alone, from the first round; the build has its own limit. A limit is a ceiling,
+  not time held: a warm build takes minutes and the job ends that much sooner. The 45 minutes on top cover
+  checkout, simulator setup, the last recovery check, collection, issues and artifacts. A 6-hour stress at 4-minute
+  rounds is about 80 rounds; an hour, about 13.
+- **The manual job's limit** is worked out in a short `plan` job on a hosted runner, since expressions cannot add.
+  It must stay within 24 hours (`minutes` + `build_minutes` ≤ 1395), the lifetime of the `GITHUB_TOKEN` the job
+  needs at the end to file issues.
 - **One at a time.** Both workflows share the `stress-sim` concurrency group: a manual run started during the
   nightly waits for it, and the other way round. GitHub keeps only one waiting run per group, so a second manual
   run started while one waits replaces it.
@@ -116,14 +120,14 @@ workflow with no trigger of its own; both of them call it.
   lane lock does. A job that finds the lane held exits with 4, which the workflow reports as a warning.
 - **Persistent cache.** `TRIO_REPO`, `TH_DERIVED_DATA` and `TH_BUILD_DIR` live in the lane's cache, which survives
   between jobs: `/Volumes/work/cache/tandemkit-stress` where that volume is writable, else
-  `~/Library/Caches/tandemkit-stress`. A warm build is incremental (usually only TandemKit changed). A cold one with TSan can use up an hour-long manual run, and is
-  reported as `build-incomplete` or `built-only` when it does; the next run starts warm.
+  `~/Library/Caches/tandemkit-stress`. A warm build is incremental (usually only TandemKit changed). A cold one with
+  TSan is long; if it reaches the build limit, the next run continues it.
 - **Checkouts and tokens.** This repository is checked out with the job's own token. trio-test-harness is checked
   out at the commit the submodule pins (or `harness_ref`), and Trio's TandemKit submodule is fetched, with a GitHub
   App token (`TRIO_E2E_APP_ID` / `TRIO_E2E_APP_KEY`, contents read on trio-test-harness and TandemKit). That token
-  lasts an hour, so the lane fetches everything from GitHub in its first minutes; faketandem, which is public, is
-  fetched anonymously first.
-- **Issues.** Findings (exit 1) and build breaks (exit 3) go to this repository through `file-issues` with the
+  lasts an hour, so the build step fetches everything from GitHub in its first minutes, and the stress step needs
+  nothing from GitHub. faketandem, which is public, is fetched anonymously first.
+- **Issues.** Findings (stress exit 1) and build breaks (build exit 3) go to this repository through `file-issues` with the
   workflow's `GITHUB_TOKEN` (`issues: write`):
   - one issue per fingerprint, marked `<!-- stress-fingerprint: … -->`, labelled `stress` and `stress:<kind>`
   - a repeat comments on the open issue

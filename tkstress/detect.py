@@ -118,6 +118,8 @@ class Findings:
     def __init__(self, path: Path):
         self.path = path
         self.items: dict[str, Finding] = {}
+        if path.exists():
+            self.items = {f.fp: f for f in (Finding(**d) for d in json.loads(path.read_text() or "[]"))}
 
     def add(self, f: Finding) -> bool:
         """True when the fingerprint is new to this run."""

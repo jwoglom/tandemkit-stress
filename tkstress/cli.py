@@ -102,11 +102,13 @@ def cmd_doctor(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    from .lane import add_run_arguments
+    from .lane import add_build_arguments, add_run_arguments
     p = argparse.ArgumentParser(prog="tandemkit-stress",
                                 description="TandemKit stress lane: Trio on the simulator against faketandem")
     sp = p.add_subparsers(dest="cmd", required=True)
-    add_run_arguments(sp.add_parser("run", help="checkout + build + chaos rounds + recovery checks until a deadline"))
+    add_run_arguments(sp.add_parser("run", help="build (or --build RUN_DIR), then --minutes of chaos rounds and recovery checks"))
+    add_build_arguments(sp.add_parser("build", help="checkout + build Trio and faketandem into a new run directory, "
+                                                     "for `run --build`"))
     fi = sp.add_parser("file-issues", help="one GitHub issue per distinct finding of a run (deduplicated)")
     fi.add_argument("run_dir")
     fi.add_argument("--repo", help="owner/repo (default TKSTRESS_ISSUES_REPO, GITHUB_REPOSITORY in CI, else this "
@@ -131,6 +133,9 @@ def main(argv=None) -> int:
         if args.cmd == "run":
             from .lane import cmd_run
             return cmd_run(args)
+        if args.cmd == "build":
+            from .lane import cmd_build
+            return cmd_build(args)
         if args.cmd == "file-issues":
             from .issues import cmd_file_issues
             return cmd_file_issues(args)

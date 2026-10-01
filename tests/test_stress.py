@@ -88,6 +88,15 @@ class CrashAndHangReports(unittest.TestCase):
         self.assertIn("TandemPumpManager.status.getter", f.title)
         self.assertNotIn("commandQueue", f.details)          # only the main thread's stack
 
+    def test_findings_reopen_with_the_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = D.Findings(Path(d) / "findings.json")
+            first.add(D.Finding(kind="build", title="t", signature=["x"]))
+            again = D.Findings(Path(d) / "findings.json")
+            self.assertEqual([f.title for f in again], ["t"])
+            again.add(D.Finding(kind="build", title="t", signature=["x"]))
+            self.assertEqual(next(iter(again)).occurrences, 2)
+
     def test_findings_dedupe(self):
         with tempfile.TemporaryDirectory() as d:
             fs = D.Findings(Path(d, "findings.json"))
@@ -305,30 +314,91 @@ class Lane(unittest.TestCase):
         self.assertEqual(code, L.EXIT_BUSY)
         self.assertEqual(result["status"], "busy")
 
-    def test_a_budget_too_short_for_a_round_gives_the_build_all_of_it(self):
+    def _fake_build_env(self, d: str, build_side_effect=None):
+        """A run directory root, lane lock and a stand-in app, faketandem and xcodebuild under `d`."""
         from unittest import mock
         from harness import build as B
         from harness.config import CONFIG
+        from tkstress import faketandem as FT
+        from tkstress import lane as L
+        app = Path(d) / "Trio.app"
+        app.mkdir()
+        (app / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "org.example.trio",
+                                                        "CFBundleExecutable": "Trio"}))
+        (app / "Trio").write_bytes(b"binary")
+        built = mock.Mock(app_path=str(app), bundle_id="org.example.trio", xcode="26.2")
+        fk = FT.Faketandem(Path(d) / "faketandem", Path(d) / "cliparser.jar", {"ref": "main", "sha": "abc"})
+        return app, [mock.patch.dict(CONFIG.values, {"TH_RUNS_DIR": d}), mock.patch.object(L, "CACHE_DIR", Path(d)),
+                     mock.patch.object(FT.Faketandem, "prepare", return_value=fk),
+                     mock.patch.object(B, "prepare_source", return_value=(Path(d), {"sha": "abc"})),
+                     mock.patch.object(B, "build", side_effect=build_side_effect, return_value=built)]
+
+    def test_build_records_the_app_and_run_build_refuses_one_rebuilt_since(self):
         from tkstress import lane as L
         from tkstress.cli import build_parser
-        from tkstress.detect import Findings
-        args = build_parser().parse_args(["run", "--minutes", "10"])
-        seen = {}
+        with tempfile.TemporaryDirectory() as d:
+            app, patches = self._fake_build_env(d)
+            with contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()):
+                for pt in patches:
+                    stack.enter_context(pt)
+                code = L.Lane(build_parser().parse_args(["build", "--tandemkit", "my-branch"])).execute()
+                run_dir = next(Path(d).glob("*-stress-my-branch"))
+                self.assertEqual(code, L.EXIT_CLEAN)
+                self.assertEqual(json.loads((run_dir / "result.json").read_text())["status"], "built")
+                lane = L.Lane(build_parser().parse_args(["run", "--build", str(run_dir), "--minutes", "10"]))
+                lane.run = L.open_run(run_dir)
+                self.assertEqual(lane.load_build(), (app, "org.example.trio"))
+                self.assertEqual(lane.args.tandemkit, "my-branch")
+                (app / "Trio").write_bytes(b"another build")
+                with self.assertRaises(HarnessError):
+                    lane.load_build()
 
-        def fake_build(*_, timeout=None, **__):
-            seen["timeout"] = timeout
-            raise B.BuildTimeout("xcodebuild stopped after 7 min")
-        with tempfile.TemporaryDirectory() as d, mock.patch.dict(CONFIG.values, {"TH_RUNS_DIR": d}), \
-                mock.patch.object(B, "prepare_source", return_value=(Path(d), {})), \
-                mock.patch.object(B, "build", side_effect=fake_build):
-            lane = L.Lane(args)
-            lane.run = L.new_run("t", {})
-            lane.findings = Findings(lane.run.path / "findings.json")
-            with self.assertRaises(L._Stop) as cm:
-                lane.checkout_and_build()
-        self.assertAlmostEqual(seen["timeout"], 10 * 60 - L.COLLECT_RESERVE_S, delta=5)
-        self.assertEqual(cm.exception.status, "build-incomplete")
-        self.assertIn("only builds", cm.exception.note)
+    def test_a_build_stopped_at_its_limit_is_incomplete_not_failed(self):
+        from harness import build as B
+        from tkstress import lane as L
+        from tkstress.cli import build_parser
+        with tempfile.TemporaryDirectory() as d:
+            _, patches = self._fake_build_env(d, build_side_effect=B.BuildTimeout("xcodebuild stopped after 90 min"))
+            with contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()):
+                for pt in patches:
+                    stack.enter_context(pt)
+                code = L.Lane(build_parser().parse_args(["build", "--build-minutes", "90"])).execute()
+                result = json.loads(next(Path(d).glob("*/result.json")).read_text())
+        self.assertEqual(code, L.EXIT_CLEAN)
+        self.assertEqual(result["status"], "build-incomplete")
+
+    def test_minutes_is_the_stress_alone(self):
+        from unittest import mock
+        from tkstress import lane as L
+        from tkstress.cli import build_parser
+        clock = [1000.0]
+        spans = []
+
+        class FakeChaos:
+            def __init__(self, *_, **__):
+                self.counts, self.round, self.gaps = {}, 0, None
+
+            def run_for(self, span, should_stop=None):
+                spans.append(span)
+                clock[0] += span
+                return []
+
+            def quiesce(self):
+                pass
+
+        def check(*_, **__):
+            clock[0] += 30
+            return {"ok": True, "stage": "probe", "seconds": 30}
+        lane = L.Lane(build_parser().parse_args(["run", "--minutes", "10"]))
+        lane.run, lane.fk, lane.ui = mock.Mock(path=Path(tempfile.gettempdir())), mock.Mock(), None
+        lane.app = mock.Mock(died_unexpectedly=lambda: False, metrics=lambda: {})
+        lane.dump_requests = lambda: None
+        with mock.patch.object(L, "time", mock.Mock(time=lambda: clock[0])), \
+                mock.patch("tkstress.chaos.Chaos", FakeChaos), mock.patch("tkstress.recovery.check", check):
+            self.assertEqual(lane.left(), float("inf"))
+            lane.deadline = clock[0] + 10 * 60
+            lane.rounds_loop()
+        self.assertEqual(spans, [240, 240, 60])
 
     def test_only_a_webdriveragent_this_checkout_started_counts_as_ours(self):
         from unittest import mock
