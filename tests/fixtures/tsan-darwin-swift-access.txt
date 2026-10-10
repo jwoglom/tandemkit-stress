@@ -1,0 +1,34 @@
+2026-10-09 16:41:21.000 Trio[33490:a1b2c3] some app log line
+WARNING: ThreadSanitizer: Swift access race (pid=33490)
+  Modifying access of Swift variable at 0x000119700130 by main thread (mutexes: write M0):
+    #0 Trio.BaseDeviceDataManager.rawPumpManager.setter : Swift.Optional<Swift.Dictionary<Swift.String, Any>> <null> (Trio.debug.dylib:arm64+0x116b590)
+    #1 Trio.BaseDeviceDataManager.pumpManager.didset : Swift.Optional<LoopKitUI.PumpManagerUI> <null> (Trio.debug.dylib:arm64+0x1168fdc)
+    #2 Trio.BaseDeviceDataManager.pumpManager.setter : Swift.Optional<LoopKitUI.PumpManagerUI> <null> (Trio.debug.dylib:arm64+0x1167ff8)
+    #3 Trio.BaseDeviceDataManager.setupPumpManager() -> () <null> (Trio.debug.dylib:arm64+0x11748dc)
+    #4 Trio.BaseDeviceDataManager.init(resolver: Swinject.Resolver) -> Trio.BaseDeviceDataManager <null> (Trio.debug.dylib:arm64+0x1174354)
+    #5 Trio.BaseDeviceDataManager.__allocating_init(resolver: Swinject.Resolver) -> Trio.BaseDeviceDataManager <null> (Trio.debug.dylib:arm64+0x1172e88)
+    #6 closure #1 (Swinject.Resolver) -> Trio.DeviceDataManager in Trio.APSAssembly.assemble(container: Swinject.Container) -> () <null> (Trio.debug.dylib:arm64+0xa75738)
+
+  Previous modifying access of Swift variable at 0x000119700130 by thread T8:
+    #0 Trio.BaseDeviceDataManager.rawPumpManager.setter : Swift.Optional<Swift.Dictionary<Swift.String, Any>> <null> (Trio.debug.dylib:arm64+0x116b590)
+    #1 Trio.BaseDeviceDataManager.pumpManagerDidUpdateState(LoopKit.PumpManager) -> () <null> (Trio.debug.dylib:arm64+0x1179394)
+    #2 protocol witness for LoopKit.PumpManagerDelegate.pumpManagerDidUpdateState(LoopKit.PumpManager) -> () in conformance Trio.BaseDeviceDataManager : LoopKit.PumpManagerDelegate in Trio <null> (Trio.debug.dylib:arm64+0x118561c)
+    #3 closure #1 @Sendable () -> () in TandemKit.TandemPumpManager.notifyDelegateStateUpdated() -> () <null> (TandemKit:arm64+0x15dd20)
+    #4 partial apply forwarder for closure #1 @Sendable () -> () in TandemKit.TandemPumpManager.notifyDelegateStateUpdated() -> () <null> (TandemKit:arm64+0x1a8768)
+    #5 reabstraction thunk helper from @escaping @callee_guaranteed @Sendable () -> () to @escaping @callee_unowned @convention(block) @Sendable () -> () <null> (TandemKit:arm64+0x1ab3c)
+    #6 __tsan::invoke_and_release_block(void*) <null> (libclang_rt.tsan_iossim_dynamic.dylib:arm64+0x7c0a8)
+    #7 _dispatch_client_callout <null> (libdispatch.dylib:arm64+0x1c4ac)
+
+  Location is heap block of size 392 at 0x000119700000 allocated by main thread:
+    #0 malloc <null> (libclang_rt.tsan_iossim_dynamic.dylib:arm64+0x5bbb4)
+    #1 _malloc_type_malloc_outlined <null> (libsystem_malloc.dylib:arm64+0xf03c)
+    #2 closure #1 (Swinject.Resolver) -> Trio.DeviceDataManager in Trio.APSAssembly.assemble(container: Swinject.Container) -> () <null> (Trio.debug.dylib:arm64+0xa75738)
+
+  Mutex M0 (0x00011bb08c98) created at:
+    #0 pthread_mutex_init <null> (libclang_rt.tsan_iossim_dynamic.dylib:arm64+0x2e5a0)
+    #1 -[NSRecursiveLock init] <null> (Foundation:arm64+0x852eb8)
+    #2 __C.NSRecursiveLock.__allocating_init() -> __C.NSRecursiveLock <null> (Trio.debug.dylib:arm64+0x65669c)
+
+  Thread T8 (tid=16939286, running) is a GCD worker thread
+
+SUMMARY: ThreadSanitizer: Swift access race (~/<base64><device>/data/Containers/Bundle/Application/<app>/Trio.app/Trio.debug.dylib:arm64+0x116b590) in Trio.BaseDeviceDataManager.rawPumpManager.setter : Swift.Optional<Swift.Dictionary<Swift.String, Any>>+0xc0

@@ -58,6 +58,28 @@ class SanitizerReports(unittest.TestCase):
         self.assertFalse(any("libdispatch" in s or "_dispatch" in s for s in f.signature))
         self.assertFalse(any("malloc" in s or "init(state" in s for s in f.signature))  # allocation stack excluded
 
+    def test_swift_access_race_signs_with_both_access_stacks(self):
+        [f] = D.scan_stderr((FIX / "tsan-darwin-swift-access.txt").read_text())
+        self.assertEqual(f.component, "Trio")
+        self.assertIn("rawPumpManager.setter", f.title)
+        self.assertTrue(any("pumpManager.didset" in s for s in f.signature))
+        self.assertTrue(any("pumpManagerDidUpdateState" in s for s in f.signature))
+        self.assertFalse(any("malloc" in s or "NSRecursiveLock" in s for s in f.signature))
+
+    def test_a_race_signs_the_same_whichever_access_tsan_prints_first(self):
+        text = (FIX / "tsan-darwin-swift-access.txt").read_text()
+        i, j, k = text.index("  Modifying access"), text.index("  Previous modifying"), text.index("  Location is")
+        swapped = text[:i] + text[j:k] + text[i:j] + text[k:]
+        [a], [b] = D.scan_stderr(text), D.scan_stderr(swapped)
+        self.assertEqual(a.fp, b.fp)
+        self.assertEqual(a.title, b.title)
+
+    def test_read_only_swift_access_counts_as_an_access_stack(self):
+        text = (FIX / "tsan-darwin-swift-access.txt").read_text().replace(
+            "Previous modifying access", "Previous read-only access")
+        [f] = D.scan_stderr(text)
+        self.assertTrue(any("pumpManagerDidUpdateState" in s for s in f.signature))
+
     def test_main_thread_checker(self):
         mtc = [f for f in D.scan_stderr((FIX / "tsan-darwin.txt").read_text()) if f.kind == "main-thread"]
         self.assertEqual(len(mtc), 1)
