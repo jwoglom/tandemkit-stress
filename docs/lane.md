@@ -65,7 +65,7 @@ Each run leaves `summary.md`, `result.json` and `findings.json` in `runs/<ts>-st
 
 | kind | detected by | fingerprint |
 |---|---|---|
-| `tsan` / `asan` | sanitizer reports on the app's stderr | report kind + the top 3 non-system frames of the access and the conflicting access (allocation, thread creation and mutex stacks are left out) |
+| `tsan` / `asan` | sanitizer reports on the app's stderr | report kind + the top 3 non-system frames of the access and the conflicting access, in either order for TSan, which prints the later access first (allocation, thread creation and mutex stacks are left out) |
 | `main-thread` | Main Thread Checker on stderr (`--main-thread-checker`) | API + top 3 app frames |
 | `crash` | `Trio*.ips` written during the run (skipping SIGKILL/SIGTERM of a pid the harness ended) | exception + top 4 non-system frames of the crashed thread |
 | `app-died` | the app's pid gone without the harness ending it | (one per run; the crash report carries the detail) |

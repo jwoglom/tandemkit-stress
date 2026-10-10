@@ -161,7 +161,8 @@ SAN_FRAME = re.compile(r"^\s*#\d+\s+(?:0x[0-9a-f]+\s+in\s+)?(?P<sym>.+?)"
 SAN_START = re.compile(r"^(?:==\d+==)?\s*(?:WARNING|ERROR): (ThreadSanitizer|AddressSanitizer): (.+?)(?: \(pid=\d+\))?\s*$")
 # Stacks whose frames identify a race: the access and the conflicting one. Allocation sites, thread creation and
 # mutex acquisition stacks say where, not what, and change with unrelated refactors.
-ACCESS_STACK = re.compile(r"^\s{2}(?:Previous |Atomic )*(?:[Aa]tomic )?(?:read|write|Read|Write)\b|"
+# A Swift access race heads its stacks "Modifying access of Swift variable" / "Read-only access of …".
+ACCESS_STACK = re.compile(r"^\s{2}(?:Previous |Atomic )*(?:[Aa]tomic )?(?:read|write|Read|Write|[Mm]odifying)\b|"
                           r"^(?:READ|WRITE) of size|^freed by thread|^previously allocated by")
 
 
@@ -208,11 +209,18 @@ def parse_sanitizer_reports(text: str) -> list[dict]:
 
 def sanitizer_finding(report: dict, *, top: int = 3) -> Finding:
     kind = "tsan" if report["tool"] == "ThreadSanitizer" else "asan"
+
+    def keep(stack: list[Frame]) -> list[str]:
+        return [f.short() for f in ([f for f in stack if f.interesting][:top] or stack[:top])]
+
+    stacks = report["stacks"][:2]
+    if kind == "tsan":
+        # TSan prints the later access first, and either thread can be the later one.
+        stacks = sorted(stacks, key=keep)
     sig: list[str] = [report["kind"]]
     frames_all: list[Frame] = []
-    for stack in report["stacks"][:2]:
-        keep = [f for f in stack if f.interesting][:top] or stack[:top]
-        sig += [f.short() for f in keep]
+    for stack in stacks:
+        sig += keep(stack)
         frames_all += stack
     lead = next((f for f in frames_all if f.interesting), frames_all[0] if frames_all else None)
     title = f"{report['tool']}: {report['kind']}" + (f" in {demangle(lead.symbol)}" if lead else "")
