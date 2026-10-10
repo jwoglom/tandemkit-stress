@@ -347,11 +347,24 @@ def stderr_reports(text: str) -> list[tuple[int, bool, Finding]]:
             + [(i, i + 60 <= n, f) for i, f in _main_thread_checker_reports(text)])
 
 
+# "    2580 Thread_1234   DispatchQueue_1: com.apple.main-thread  (serial)" up to the next thread's header
+SAMPLE_MAIN_THREAD = re.compile(r"(?:(\d+)\s+)?Thread_\d+\s+DispatchQueue_1: com\.apple\.main-thread.*?"
+                                r"(?=\n\s*\d*\s*Thread_\d+|\n\s*Total number|\n\nBinary Images|\Z)", re.S)
+
+
+def main_thread_waiting(sample_text: str) -> bool:
+    """Whether the main thread spent most of a macOS `sample` waiting in its run loop for an event, as a live app's
+    does: whatever made a probe slow, the app answers now."""
+    main = SAMPLE_MAIN_THREAD.search(sample_text)
+    if not main or not main.group(1):
+        return False
+    waiting = sum(int(n) for n in re.findall(r"(\d+)\s+__CFRunLoopServiceMachPort\b", main.group(0)))
+    return waiting * 2 > int(main.group(1))
+
+
 def sample_finding(sample_text: str, *, what: str) -> Finding:
     """A hang: the main thread's stack from macOS `sample` output, reduced to its first app frames."""
-    # "    2580 Thread_1234   DispatchQueue_1: com.apple.main-thread  (serial)" up to the next thread's header
-    main = re.search(r"Thread_\d+\s+DispatchQueue_1: com\.apple\.main-thread.*?"
-                     r"(?=\n\s*\d*\s*Thread_\d+|\n\s*Total number|\n\nBinary Images|\Z)", sample_text, re.S)
+    main = SAMPLE_MAIN_THREAD.search(sample_text)
     frames: list[Frame] = []
     for line in (main.group(0) if main else "").splitlines():
         m = re.search(r"\d+\s+(.+?)\s+\(in ([^)]+)\)", line)

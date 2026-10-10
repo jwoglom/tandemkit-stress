@@ -46,8 +46,8 @@ from pathlib import Path
 from harness.util import HarnessError, log
 from . import CACHE_DIR, HARNESS_DIR
 from .lock import LaneBusy, holder_description
-from .detect import (Finding, Findings, crash_finding, default_crash_dirs, find_crash_reports, parse_ips,
-                     sample_finding, stderr_reports)
+from .detect import (Finding, Findings, crash_finding, default_crash_dirs, find_crash_reports, main_thread_waiting,
+                     parse_ips, sample_finding, stderr_reports)
 
 DEFAULT_TRIO = "nightscout/Trio:feat/tandem-closed-beta"
 DEFAULT_TANDEMKIT = "dev"
@@ -440,24 +440,40 @@ class Lane:
             self.scan_stderr()
             self.app.launch()
 
-    def check_hang(self, r: int) -> None:
-        """A WebDriverAgent query needs the app's main thread; minutes without an answer from a live app is a hang."""
-        if self.ui is None or not self.app.alive():
-            return
-        t = time.time()
-        try:
-            self.ui.find("Settings", exact=True)
-        except Exception:  # noqa: BLE001 - the timing is what matters
-            pass
-        took = time.time() - t
-        if took < self.args.hang_seconds:
-            return
+    def check_hang(self, r: int, *, foreground_timed_out: bool = False) -> bool:
+        """A live app whose main thread leaves a WebDriverAgent query or `simctl launch` unanswered, and whose sample
+        shows it stuck, is a hang: filed, then relaunched, so the recovery check tests the driver, not a frozen app."""
+        if not self.app.alive():
+            return False
+        took = None
+        if self.ui is not None:
+            t = time.time()
+            try:
+                self.ui.find("Settings", exact=True)
+            except Exception:  # noqa: BLE001 - the timing is what matters
+                pass
+            took = time.time() - t
+        slow = took is not None and took >= self.args.hang_seconds
+        if not (slow or foreground_timed_out):
+            return False
         dest = self.run.path / "hangs" / f"round-{r:02d}.txt"
         dest.parent.mkdir(exist_ok=True)
-        if self.app.sample(dest):
-            f = sample_finding(dest.read_text(errors="replace"), what=f"accessibility query took {took:.0f}s")
-            f.round, f.evidence = r, [str(dest.relative_to(self.run.path))]
-            self.add_finding(f)
+        if not self.app.sample(dest):
+            return False
+        text = dest.read_text(errors="replace")
+        if main_thread_waiting(text):
+            log(f"round {r}: the app was slow to answer, but its main thread is waiting for events: not a hang")
+            return False
+        f = sample_finding(text, what=f"accessibility query took {took:.0f}s" if slow else "simctl launch timed out")
+        f.round, f.evidence = r, [str(dest.relative_to(self.run.path))]
+        self.add_finding(f)
+        log(f"round {r}: relaunching the hung app (pid {self.app.pid})")
+        self.app.kill()
+        try:
+            self.app.launch()
+        except HarnessError as e:
+            log(f"round {r}: relaunching the hung app failed: {e}")
+        return True
 
     def rounds_loop(self):
         from harness.flows import trio as F
@@ -481,12 +497,16 @@ class Lane:
             log(f"== round {r}: {intensity} chaos for {span / 60:.1f} min")
             recs = self.chaos.run_for(span, should_stop=self.tick)
             self.check_app(r)
-            self.chaos.quiesce()
+            quiesced = self.chaos.quiesce() or []
+            relaunched = self.check_hang(r, foreground_timed_out=any(
+                x["action"] == "quiesce_app" and x["result"] == "error" and "timed out" in x["detail"]
+                for x in quiesced))
             res = recovery.check(self.fk.client, session_timeout=a.session_timeout, probe_timeout=a.probe_timeout)
             self.dump_requests()
             applied = sum(1 for x in recs if x["result"] == "ok" and x["category"] not in ("undo", "quiesce"))
             metrics = self.app.metrics() if hasattr(self.app, "metrics") else {}
-            self.rounds.append({"round": r, "intensity": intensity, "actions": applied, **metrics, **res})
+            self.rounds.append({"round": r, "intensity": intensity, "actions": applied, **metrics, **res,
+                                **({"relaunched_hung_app": True} if relaunched else {})})
             log(f"round {r}: {applied} actions applied; recovery {'ok' if res['ok'] else 'FAILED'} "
                 f"({res.get('stage')}, {res.get('seconds')}s)")
             if not res["ok"]:
@@ -511,7 +531,6 @@ class Lane:
                     signature=[res["stage"]], component="TandemKit", round=r, evidence=ev,
                     details=json.dumps({"recovery check": res, "faketandem state after it": pump}, indent=2,
                                        default=str)))
-            self.check_hang(r)
             self.check_app(r)
             self.scan_stderr()
         return r
@@ -612,8 +631,9 @@ class Lane:
             lines += ["### Rounds", "", "| # | intensity | actions | recovery | after | MB | threads |",
                       "|---|---|---|---|---|---|---|"]
             lines += [f"| {r['round']} | {r.get('intensity', '')} | {r['actions']} | "
-                      f"{'ok' if r['ok'] else 'FAILED at ' + r['stage']} | {r.get('seconds', '?')}s | "
-                      f"{r.get('rss_mb', '')} | {r.get('threads', '')} |" for r in self.rounds]
+                      f"{'ok' if r['ok'] else 'FAILED at ' + r['stage']}"
+                      f"{' (hung app relaunched first)' if r.get('relaunched_hung_app') else ''} | "
+                      f"{r.get('seconds', '?')}s | {r.get('rss_mb', '')} | {r.get('threads', '')} |" for r in self.rounds]
             lines.append("")
         tk = subs.get("TandemKit") or self.args.tandemkit
         if self.stress:

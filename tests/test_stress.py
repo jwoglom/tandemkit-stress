@@ -96,6 +96,11 @@ class CrashAndHangReports(unittest.TestCase):
         self.assertIn("TandemPumpManager.status.getter", f.title)
         self.assertNotIn("commandQueue", f.details)          # only the main thread's stack
 
+    def test_a_main_thread_waiting_in_its_run_loop_is_not_stuck(self):
+        self.assertFalse(D.main_thread_waiting((FIX / "trio-hang-sample.txt").read_text()))
+        self.assertTrue(D.main_thread_waiting((FIX / "trio-idle-sample.txt").read_text()))
+        self.assertFalse(D.main_thread_waiting("no call graph"))
+
     def test_findings_reopen_with_the_run(self):
         with tempfile.TemporaryDirectory() as d:
             first = D.Findings(Path(d) / "findings.json")
@@ -540,6 +545,64 @@ class Lane(unittest.TestCase):
             lane.deadline = clock[0] + 10 * 60
             lane.rounds_loop()
         self.assertEqual(spans, [240, 240, 60])
+
+    def _round_with_unanswered_foreground(self, d: str, sample: str):
+        """One round whose quiesce timed out foregrounding the app; `sample` stands in for the app's `sample`."""
+        from unittest import mock
+        from tkstress import lane as L
+        from tkstress.cli import build_parser
+        clock = [1000.0]
+        calls = []
+
+        class FakeChaos:
+            def __init__(self, *_, **__):
+                self.counts, self.round, self.gaps = {}, 0, None
+
+            def run_for(self, span, should_stop=None):
+                clock[0] += span
+                return []
+
+            def quiesce(self):
+                return [{"action": "quiesce_app", "category": "quiesce", "result": "error",
+                         "detail": "HarnessError: timed out after 60s: xcrun simctl launch <uuid> org.example.trio"}]
+
+        def check(*_, **__):
+            calls.append("recovery check")
+            return {"ok": True, "stage": "probe", "seconds": 30}
+
+        def take_sample(dest):
+            calls.append("sample")
+            dest.write_text((FIX / sample).read_text())
+            return dest
+        lane = L.Lane(build_parser().parse_args(["run", "--minutes", "4"]))
+        lane.run, lane.fk, lane.ui = mock.Mock(path=Path(d)), mock.Mock(), None
+        lane.findings = D.Findings(Path(d) / "findings.json")
+        lane.app = mock.Mock(died_unexpectedly=lambda: False, alive=lambda: True, metrics=lambda: {},
+                             stderr_files=lambda: [], sample=take_sample, launches=[{}], pid=1,
+                             kill=lambda: calls.append("kill"), launch=lambda: calls.append("launch"))
+        lane.dump_requests = lambda: None
+        with mock.patch.object(L, "time", mock.Mock(time=lambda: clock[0])), \
+                mock.patch("tkstress.chaos.Chaos", FakeChaos), mock.patch("tkstress.recovery.check", check):
+            lane.deadline = clock[0] + 4 * 60
+            lane.rounds_loop()
+        return lane, calls
+
+    def test_a_hung_app_is_filed_as_a_hang_and_relaunched_before_the_recovery_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            lane, calls = self._round_with_unanswered_foreground(d, "trio-hang-sample.txt")
+            found = list(lane.findings)
+        self.assertEqual(calls, ["sample", "kill", "launch", "recovery check"])
+        self.assertEqual([f.kind for f in found], ["hang"])
+        self.assertIn("simctl launch timed out", found[0].title)
+        self.assertTrue(lane.rounds[0]["relaunched_hung_app"])
+
+    def test_a_slow_answer_from_an_app_waiting_for_events_is_not_a_hang(self):
+        with tempfile.TemporaryDirectory() as d:
+            lane, calls = self._round_with_unanswered_foreground(d, "trio-idle-sample.txt")
+            found = list(lane.findings)
+        self.assertEqual(calls, ["sample", "recovery check"])
+        self.assertEqual(found, [])
+        self.assertNotIn("relaunched_hung_app", lane.rounds[0])
 
     def test_until_cuts_the_stress_short_only_when_it_is_sooner(self):
         from tkstress.lane import stress_window
