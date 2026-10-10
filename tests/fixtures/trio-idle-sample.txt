@@ -1,0 +1,23 @@
+Analysis of sampling Trio (pid 4243) every 1 millisecond
+Process:         Trio [4243]
+Call graph:
+    2600 Thread_2234   DispatchQueue_1: com.apple.main-thread  (serial)
+    + 2600 start  (in dyld) + 2840  [0x180c6e0e0]
+    +   2600 main  (in Trio.debug.dylib) + 100  [0x100002000]
+    +     2600 UIApplicationMain  (in UIKitCore) + 120  [0x18a000000]
+    +       2600 -[UIApplication _run]  (in UIKitCore) + 868  [0x18a000100]
+    +         2600 GSEventRunModal  (in GraphicsServices) + 116  [0x18c000000]
+    +           2600 CFRunLoopRunSpecific  (in CoreFoundation) + 536  [0x180400000]
+    +             2410 __CFRunLoopRun  (in CoreFoundation) + 1160  [0x180400100]
+    +             ! 2380 __CFRunLoopServiceMachPort  (in CoreFoundation) + 160  [0x180400200]
+    +             ! : 2380 mach_msg  (in libsystem_kernel.dylib) + 24  [0x180f00000]
+    +             ! : 2380 mach_msg2_trap  (in libsystem_kernel.dylib) + 8  [0x180f00100]
+    +             ! 30 __CFRunLoopDoSources0  (in CoreFoundation) + 232  [0x180400300]
+    +             !   30 TandemPumpManager.status.getter  (in TandemKit) + 40  [0x104b00000]
+    +             190 __CFRunLoopDoTimers  (in CoreFoundation) + 300  [0x180400400]
+    +               190 HomeStateModel.updateDisplay()  (in Trio.debug.dylib) + 64  [0x100003000]
+    2600 Thread_2235: com.jwoglom.TandemKit.commandQueue
+    + 2600 _dispatch_worker_thread2  (in libdispatch.dylib) + 52  [0x180100000]
+    +   2600 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x180f00200]
+
+Total number in stack (recursive counted multiple times):

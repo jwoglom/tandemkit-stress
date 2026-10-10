@@ -149,6 +149,12 @@ class CrashAndHangReports(unittest.TestCase):
         f = D.sample_finding(text, what="test")
         self.assertIn("Main thread unresponsive (test) in PersistedProperty.wrappedValue.setter", f.title)
 
+    def test_a_main_thread_waiting_in_its_run_loop_is_not_stuck(self):
+        self.assertTrue(D.main_thread_waiting((FIX / "trio-idle-sample.txt").read_text()))
+        self.assertFalse(D.main_thread_waiting((FIX / "trio-hang-sample.txt").read_text()))
+        self.assertFalse(D.main_thread_waiting((FIX / "trio-hang-tsan-report.txt").read_text()))
+        self.assertFalse(D.main_thread_waiting("no call graph"))
+
     def test_findings_reopen_with_the_run(self):
         with tempfile.TemporaryDirectory() as d:
             first = D.Findings(Path(d) / "findings.json")
@@ -650,6 +656,62 @@ class Lane(unittest.TestCase):
         self.assertEqual(found[0].evidence, ["hangs/round-01.txt"])
         lane.app.kill.assert_called_once()
         lane.app.launch.assert_called_once()
+
+    def _one_round(self, d: str, *, query_seconds: float | None, quiesced: list[dict], sample: str):
+        """A round whose recovery check fails. `query_seconds`: how long WebDriverAgent's query takes, None for no
+        WebDriverAgent; `sample` is the fixture standing in for the app's `sample`."""
+        from unittest import mock
+        from tkstress import lane as L
+        from tkstress.cli import build_parser
+        clock = [1000.0]
+
+        class FakeChaos:
+            def __init__(self, *_, **__):
+                self.counts, self.round, self.gaps = {}, 0, None
+
+            def run_for(self, span, should_stop=None):
+                clock[0] += span
+                return []
+
+            def quiesce(self):
+                return quiesced
+
+        def find(*_, **__):
+            clock[0] += query_seconds
+
+        def take_sample(dest):
+            dest.write_text((FIX / sample).read_text())
+            return dest
+        lane = L.Lane(build_parser().parse_args(["run", "--minutes", "4"]))
+        lane.run, lane.fk = mock.Mock(path=Path(d)), mock.Mock()
+        lane.ui = None if query_seconds is None else mock.Mock(find=find)
+        lane.findings = D.Findings(Path(d) / "findings.json")
+        lane.app = mock.Mock(died_unexpectedly=lambda: False, alive=lambda: True, metrics=lambda: {},
+                             stderr_files=lambda: [], sample=take_sample, launches=[{}], pid=1)
+        lane.dump_requests = lambda: None
+        failed = {"ok": False, "stage": "session", "seconds": 120}
+        with mock.patch.object(L, "time", mock.Mock(time=lambda: clock[0])), \
+                mock.patch("tkstress.chaos.Chaos", FakeChaos), mock.patch("tkstress.recovery.check", lambda *_, **__: failed):
+            lane.deadline = clock[0] + 4 * 60
+            lane.rounds_loop()
+        return lane, list(lane.findings)
+
+    def test_without_webdriveragent_a_foreground_that_timed_out_finds_the_hang(self):
+        timed_out = [{"action": "quiesce_app", "category": "quiesce", "result": "error",
+                      "detail": "HarnessError: timed out after 60s: xcrun simctl launch <uuid> org.example.trio"}]
+        with tempfile.TemporaryDirectory() as d:
+            lane, found = self._one_round(d, query_seconds=None, quiesced=timed_out, sample="trio-hang-tsan-report.txt")
+        self.assertEqual([f.kind for f in found], ["hang"])
+        self.assertIn("simctl launch timed out", found[0].title)
+        lane.app.kill.assert_called_once()
+        lane.app.launch.assert_called_once()
+
+    def test_a_slow_query_from_an_app_waiting_for_events_is_not_a_hang(self):
+        with tempfile.TemporaryDirectory() as d:
+            lane, found = self._one_round(d, query_seconds=90, quiesced=[], sample="trio-idle-sample.txt")
+        self.assertEqual([f.kind for f in found], ["no-recovery"])
+        lane.app.kill.assert_not_called()
+        lane.app.launch.assert_not_called()
 
     def test_until_cuts_the_stress_short_only_when_it_is_sooner(self):
         from tkstress.lane import stress_window

@@ -414,6 +414,15 @@ def _stuck_race_report(threads: list[SampleThread]) -> tuple[SampleThread, Frame
     return None
 
 
+def main_thread_waiting(sample_text: str) -> bool:
+    """Whether the main thread spent most of a `sample` waiting in its run loop for an event, as a live app's does:
+    whatever made a probe slow, the app answers now."""
+    main = next((t for t in sample_threads(sample_text) if "DispatchQueue_1: com.apple.main-thread" in t.name), None)
+    if not main:
+        return False
+    return sum(n for _, n, f in main.frames if f.symbol == "__CFRunLoopServiceMachPort") * 2 > main.samples
+
+
 def sample_finding(sample_text: str, *, what: str) -> Finding:
     """A hang from macOS `sample` output: the main thread's stack, reduced to its deepest app frames. When a thread is
     stuck in ThreadSanitizer's race report it is named by the reported access instead, since either side of the race
