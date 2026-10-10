@@ -124,7 +124,8 @@ One issue per distinct failure, identified by kind plus the top non-system stack
   not get to.
 - **What an issue holds,** so it can be read without the run's logs:
   - the full report: sanitizer report with every stack; crash with the crashed thread, last exception backtrace and
-    every other thread's top frames; the hang's main-thread sample; the reconnect check with faketandem's state
+    every other thread's top frames; the hang's main-thread sample (and, when ThreadSanitizer deadlocked reporting a
+    race, the reporting thread's); the reconnect check with faketandem's state
   - when it happened: round and intensity, minutes into the stress, app launch and pid, memory and threads
   - the 30 chaos actions before it, the last 80 messages faketandem saw (kind, message, txId, faults, cargo) and
     the last 200 lines of TandemKit's log

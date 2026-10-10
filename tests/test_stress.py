@@ -65,6 +65,41 @@ class SanitizerReports(unittest.TestCase):
         self.assertEqual(mtc[0].component, "TandemKit")
 
 
+    def test_a_swift_access_race_between_two_writes_signs_with_both_stacks(self):
+        f = D.scan_stderr((FIX / "tsan-swift-access.txt").read_text())[0]
+        self.assertEqual(f.component, "Trio")
+        self.assertIn("rawPumpManager.setter", f.title)
+        self.assertTrue(any("pumpManager.didset" in s for s in f.signature))
+        self.assertTrue(any("pumpManagerDidUpdateState" in s for s in f.signature))
+        self.assertEqual(f.aliases, [])      # the old rule saw no frames: every such race had one fingerprint
+
+    def test_a_race_is_one_finding_whichever_side_tsan_caught(self):
+        text = (FIX / "tsan-swift-access.txt").read_text()
+        blocks = text.split("\n\n")
+
+        def split(block):
+            lines = block.split("\n")
+            n = next(i for i, line in enumerate(lines) if line.startswith("    #"))
+            return lines[:n], lines[n:]
+        (h0, f0), (h1, f1) = split(blocks[0]), split(blocks[1])
+        blocks[0], blocks[1] = "\n".join(h0 + f1), "\n".join(h1 + f0)
+        a, b = (D.scan_stderr(t)[0] for t in (text, "\n\n".join(blocks)))
+        self.assertEqual(a.fp, b.fp)
+
+    def test_a_signature_that_changed_keeps_the_old_fingerprint_as_an_alias(self):
+        text = (FIX / "tsan-swift-access.txt").read_text().replace(
+            "Previous modifying access of Swift variable", "Previous read of size 8")
+        f = D.scan_stderr(text)[0]
+        old = D.fingerprint("tsan", "Swift access race",
+                            "Trio`Trio.BaseDeviceDataManager.rawPumpManager.setter : "
+                            "Swift.Optional<Swift.Dictionary<Swift.String, Any>>",
+                            "Trio`Trio.BaseDeviceDataManager.pumpManagerDidUpdateState(LoopKit.PumpManager) -> ()",
+                            "TandemKit`closure #1 @Sendable () -> () in "
+                            "TandemKit.TandemPumpManager.notifyDelegateStateUpdated() -> ()")
+        self.assertEqual(f.aliases, [old])
+        self.assertNotEqual(f.fp, old)
+
+
 class CrashAndHangReports(unittest.TestCase):
     def test_crash_details_carry_the_other_threads(self):
         crash = D.parse_ips(FIX / "trio-crash.ips")
@@ -95,6 +130,24 @@ class CrashAndHangReports(unittest.TestCase):
         self.assertEqual(f.kind, "hang")
         self.assertIn("TandemPumpManager.status.getter", f.title)
         self.assertNotIn("commandQueue", f.details)          # only the main thread's stack
+
+    def test_a_hang_inside_a_tsan_race_report_is_named_by_the_reported_access(self):
+        f = D.sample_finding((FIX / "trio-hang-tsan-report.txt").read_text(), what="test")
+        self.assertEqual((f.kind, f.component), ("hang", "Trio"))
+        self.assertIn("deadlocked reporting a race in BaseDeviceDataManager.rawPumpManager.setter", f.title)
+        self.assertEqual(f.signature, ["ThreadSanitizer race report", "Trio`BaseDeviceDataManager.rawPumpManager.setter"])
+        self.assertIn("Thread_1003 was inside ThreadSanitizer's race report in all 2091 samples", f.details)
+        self.assertIn("PersistedProperty.wrappedValue.setter", f.details)      # the main thread follows
+
+    def test_a_tsan_report_hang_is_one_finding_whichever_thread_reports(self):
+        a = D.sample_finding((FIX / "trio-hang-tsan-report.txt").read_text(), what="a")
+        b = D.sample_finding((FIX / "trio-hang-tsan-report-main.txt").read_text(), what="b")
+        self.assertEqual(a.fp, b.fp)
+
+    def test_a_thread_passing_through_a_tsan_report_does_not_name_the_hang(self):
+        text = (FIX / "trio-hang-tsan-report.txt").read_text().replace("2091 __tsan::ReportRace", "3 __tsan::ReportRace")
+        f = D.sample_finding(text, what="test")
+        self.assertIn("Main thread unresponsive (test) in PersistedProperty.wrappedValue.setter", f.title)
 
     def test_findings_reopen_with_the_run(self):
         with tempfile.TemporaryDirectory() as d:
@@ -391,6 +444,22 @@ class LiveFiling(unittest.TestCase):
         self.assertIn(f"/releases/download/{time.strftime('stress-attachments-%Y-%m')}/{name}", body)
         self.assertEqual(len(entry["attachments"]), 1)
 
+    def test_a_finding_whose_signature_changed_comments_on_the_issue_it_had(self):
+        from unittest import mock
+        f = self.finding()
+        f["aliases"] = ["0123456789ab"]
+
+        def gh(args, **_):
+            self.calls.append(args)
+            hit = args[:2] == ["issue", "list"] and "0123456789ab in:body" in args
+            issue = {"number": 5, "state": "OPEN", "title": "t", "url": "https://github.com/o/r/issues/5",
+                     "body": I.MARKER.format(fp="0123456789ab")}
+            return mock.Mock(returncode=0, stdout=json.dumps([issue] if hit else []), stderr="")
+        with mock.patch.object(I, "_gh", gh):
+            entry = I.publish(f, "o/r", {"args": {}}, self.run_dir)
+        self.assertEqual((entry["action"], entry["number"]), ("commented", 5))
+        self.assertEqual(self.creates_and_comments()[0], [])
+
     def test_a_body_with_huge_context_still_fits(self):
         f = self.finding()
         f["details"] = "x" * 100000
@@ -540,6 +609,47 @@ class Lane(unittest.TestCase):
             lane.deadline = clock[0] + 10 * 60
             lane.rounds_loop()
         self.assertEqual(spans, [240, 240, 60])
+
+    def test_a_hung_app_is_sampled_relaunched_and_not_also_a_failed_recovery(self):
+        from unittest import mock
+        from tkstress import lane as L
+        from tkstress.cli import build_parser
+        clock = [1000.0]
+
+        class FakeChaos:
+            def __init__(self, *_, **__):
+                self.counts, self.round, self.gaps = {}, 0, None
+
+            def run_for(self, span, should_stop=None):
+                clock[0] += span
+                return []
+
+            def quiesce(self):
+                pass
+
+        def find(*_, **__):
+            clock[0] += 90
+
+        def sample(dest):
+            dest.write_text((FIX / "trio-hang-tsan-report.txt").read_text())
+            return dest
+        with tempfile.TemporaryDirectory() as d:
+            lane = L.Lane(build_parser().parse_args(["run", "--minutes", "4"]))
+            lane.run, lane.fk, lane.ui = mock.Mock(path=Path(d)), mock.Mock(), mock.Mock(find=find)
+            lane.findings = D.Findings(Path(d) / "findings.json")
+            lane.app = mock.Mock(died_unexpectedly=lambda: False, alive=lambda: True, metrics=lambda: {},
+                                 stderr_files=lambda: [], sample=sample, launches=[{}], pid=1)
+            lane.dump_requests = lambda: None
+            failed = {"ok": False, "stage": "session", "seconds": 120}
+            with mock.patch.object(L, "time", mock.Mock(time=lambda: clock[0])), \
+                    mock.patch("tkstress.chaos.Chaos", FakeChaos), mock.patch("tkstress.recovery.check", lambda *_, **__: failed):
+                lane.deadline = clock[0] + 4 * 60
+                lane.rounds_loop()
+            found = list(lane.findings)
+        self.assertEqual([f.kind for f in found], ["hang"])
+        self.assertEqual(found[0].evidence, ["hangs/round-01.txt"])
+        lane.app.kill.assert_called_once()
+        lane.app.launch.assert_called_once()
 
     def test_until_cuts_the_stress_short_only_when_it_is_sooner(self):
         from tkstress.lane import stress_window
