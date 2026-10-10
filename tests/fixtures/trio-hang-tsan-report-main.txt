@@ -1,0 +1,17 @@
+Analysis of sampling Trio (pid 4243) every 1 millisecond
+Process:         Trio [4243]
+Call graph:
+    2087 Thread_2001   DispatchQueue_1: com.apple.main-thread  (serial)
+    + 2087 closure #1 in closure #1 in TrioApp.deferredInitialization()  (in Trio.debug.dylib) + 100  [0x10f113308]  TrioApp.swift:198
+    +   2087 BaseDeviceDataManager.setupPumpManager()  (in Trio.debug.dylib) + 500  [0x10fc2670c]  DeviceDataManager.swift:236
+    +     2087 BaseDeviceDataManager.pumpManager.didset  (in Trio.debug.dylib) + 4016  [0x10fc1ae0c]  DeviceDataManager.swift:90
+    +       2087 BaseDeviceDataManager.rawPumpManager.setter  (in Trio.debug.dylib) + 196  [0x10fc1d3c0]  DeviceDataManager.swift:0
+    +         2087 __tsan::ExternalAccess(void*, unsigned long, unsigned long, void*, unsigned long)  (in libclang_rt.tsan_iossim_dynamic.dylib) + 476  [0x1012a8bc8]
+    +           2087 __tsan::ReportRace(__tsan::ThreadState*, __tsan::RawShadow*, __tsan::Shadow, __tsan::Shadow, unsigned long)  (in libclang_rt.tsan_iossim_dynamic.dylib) + 2160  [0x1012f1ce0]
+    +             2087 dyld4::APIs::dladdr(void const*, dl_info*)  (in dyld_sim) + 184  [0x100fe70fc]
+    +               2087 __ulock_wait2  (in libsystem_kernel.dylib) + 8  [0x105bf1b04]
+    2087 Thread_2002   DispatchQueue_1164: BaseDeviceDataManager.processQueue  (serial)
+    + 2087 _dispatch_client_callout  (in libdispatch.dylib) + 12  [0x1801db4b0]
+    +   2087 __psynch_mutexwait  (in libsystem_kernel.dylib) + 8  [0x105bf0000]
+
+Total number in stack (recursive counted multiple, when >=5):

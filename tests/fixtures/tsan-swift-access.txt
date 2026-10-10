@@ -1,0 +1,22 @@
+==================
+WARNING: ThreadSanitizer: Swift access race (pid=4242)
+  Modifying access of Swift variable at 0x000119700130 by main thread (mutexes: write M0):
+    #0 Trio.BaseDeviceDataManager.rawPumpManager.setter : Swift.Optional<Swift.Dictionary<Swift.String, Any>> <null> (Trio.debug.dylib:arm64+0x116b590)
+    #1 Trio.BaseDeviceDataManager.pumpManager.didset : Swift.Optional<LoopKitUI.PumpManagerUI> <null> (Trio.debug.dylib:arm64+0x1168fdc)
+    #2 Trio.BaseDeviceDataManager.pumpManager.setter : Swift.Optional<LoopKitUI.PumpManagerUI> <null> (Trio.debug.dylib:arm64+0x1167ff8)
+    #3 Trio.BaseDeviceDataManager.setupPumpManager() -> () <null> (Trio.debug.dylib:arm64+0x11748dc)
+
+  Previous modifying access of Swift variable at 0x000119700130 by thread T8:
+    #0 Trio.BaseDeviceDataManager.rawPumpManager.setter : Swift.Optional<Swift.Dictionary<Swift.String, Any>> <null> (Trio.debug.dylib:arm64+0x116b590)
+    #1 Trio.BaseDeviceDataManager.pumpManagerDidUpdateState(LoopKit.PumpManager) -> () <null> (Trio.debug.dylib:arm64+0x1179394)
+    #2 closure #1 @Sendable () -> () in TandemKit.TandemPumpManager.notifyDelegateStateUpdated() -> () <null> (TandemKit:arm64+0x15dd20)
+    #3 _dispatch_client_callout <null> (libdispatch.dylib:arm64+0x1c4ac)
+
+  Location is heap block of size 392 at 0x000119700000 allocated by main thread:
+    #0 malloc <null> (libclang_rt.tsan_iossim_dynamic.dylib:arm64+0x5bbb4)
+    #1 Trio.BaseDeviceDataManager.__allocating_init(resolver: Swinject.Resolver) -> Trio.BaseDeviceDataManager <null> (Trio.debug.dylib:arm64+0x1172e88)
+
+  Thread T8 (tid=1234567, running) is a GCD worker thread
+
+SUMMARY: ThreadSanitizer: Swift access race (Trio.debug.dylib:arm64+0x116b590) in Trio.BaseDeviceDataManager.rawPumpManager.setter : Swift.Optional<Swift.Dictionary<Swift.String, Any>>+0xc0
+==================

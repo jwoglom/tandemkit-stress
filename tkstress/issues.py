@@ -2,10 +2,11 @@
 background thread as findings appear (Publisher), and by `tandemkit-stress file-issues RUN_DIR` for anything a run did
 not file.
 
-An issue carries its finding's fingerprint in a hidden marker. A later run that sees the same fingerprint comments on
-the open issue instead of opening another; a closed issue whose fingerprint comes back gets a new issue that links the
-old one, since a fix that did not hold is news. issues.json in the run directory records what the run filed, so
-nothing is filed twice, and a finding seen again later in the same run gets one closing comment with its count.
+An issue carries its finding's fingerprint in a hidden marker. A later run that sees the same fingerprint, or one of
+the finding's aliases (what its signature made before the signature changed), comments on the open issue instead of
+opening another; a closed issue whose fingerprint comes back gets a new issue that links the old one, since a fix that
+did not hold is news. issues.json in the run directory records what the run filed, so nothing is filed twice, and a
+finding seen again later in the same run gets one closing comment with its count.
 
 An issue is meant to be read without the run's logs. Besides the full report it carries what the lane captured when
 the finding first appeared (lane.capture_context): round, launch and app memory, the chaos actions before it, the
@@ -121,11 +122,14 @@ def ensure_labels(repo: str, kinds: set[str]) -> None:
         _gh(["label", "create", name, "--repo", repo, "--color", color, "--description", desc, "--force"], check=False)
 
 
-def find_issue(repo: str, fp: str) -> dict | None:
-    """The issue carrying this fingerprint: an open one if there is one, else the most recent closed one."""
-    cp = _gh(["issue", "list", "--repo", repo, "--label", "stress", "--state", "all", "--search", f"{fp} in:body",
-              "--json", "number,state,title,body,url", "--limit", "20"])
-    hits = [i for i in json.loads(cp.stdout or "[]") if MARKER.format(fp=fp) in (i.get("body") or "")]
+def find_issue(repo: str, fp: str, aliases: list[str] | tuple[str, ...] = ()) -> dict | None:
+    """The issue carrying this fingerprint, or one the finding had before its signature changed: an open one if there
+    is one, else the most recent closed one."""
+    hits = []
+    for key in (fp, *aliases):
+        cp = _gh(["issue", "list", "--repo", repo, "--label", "stress", "--state", "all", "--search", f"{key} in:body",
+                  "--json", "number,state,title,body,url", "--limit", "20"])
+        hits += [i for i in json.loads(cp.stdout or "[]") if MARKER.format(fp=key) in (i.get("body") or "")]
     hits.sort(key=lambda i: (i["state"] != "OPEN", -i["number"]))
     return hits[0] if hits else None
 
@@ -308,7 +312,7 @@ def publish(f: dict, repo: str, meta: dict, run_dir: Path) -> dict:
     attachments = attach(repo, run_dir, f.get("evidence") or [], f"{f['fp']}-{run_dir.name}")
     if attachments[0]:
         entry["attachments"] = [re.search(r"\((https://[^)]+)\)", link).group(1) for link in attachments[0]]
-    existing = find_issue(repo, f["fp"])
+    existing = find_issue(repo, f["fp"], f.get("aliases") or ())
     if existing and existing["state"] == "OPEN":
         _gh(["issue", "comment", str(existing["number"]), "--repo", repo, "--body",
              comment_body(f, meta, run_dir, attachments)])

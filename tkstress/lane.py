@@ -19,7 +19,7 @@ build nor the simulator setup nor collection counts against it.
      onboarding pre-seeded, Trio's settings and a paired Tandem pump written into the container (seed.py), launched
      with TANDEMKIT_VIRTUAL_PUMP=<faketandem> (app.py)
   3. rounds, for --minutes: chaos (chaos.py) for --round-minutes, then every fault undone and the recovery check
-     (recovery.py); a dead app is a finding and is relaunched; the app's memory and thread count are recorded
+     (recovery.py); a dead or hung app is a finding and is relaunched; the app's memory and thread count are recorded
   4. collection: sanitizer and Main Thread Checker reports from every launch's stderr, crash reports, TandemKit's
      OSLog stream and log file, faketandem's request log; findings.json, summary.md, result.json
 
@@ -440,24 +440,28 @@ class Lane:
             self.scan_stderr()
             self.app.launch()
 
-    def check_hang(self, r: int) -> None:
-        """A WebDriverAgent query needs the app's main thread; minutes without an answer from a live app is a hang."""
+    def check_hang(self, r: int) -> bool:
+        """A WebDriverAgent query needs the app's main thread; minutes without an answer from a live app is a hang. A
+        hung app is sampled, then relaunched: a deadlock never clears, and left alone it is sampled again every round."""
         if self.ui is None or not self.app.alive():
-            return
+            return False
         t = time.time()
         try:
             self.ui.find("Settings", exact=True)
         except Exception:  # noqa: BLE001 - the timing is what matters
             pass
         took = time.time() - t
-        if took < self.args.hang_seconds:
-            return
+        if took < self.args.hang_seconds or not self.app.alive():
+            return False
         dest = self.run.path / "hangs" / f"round-{r:02d}.txt"
         dest.parent.mkdir(exist_ok=True)
         if self.app.sample(dest):
             f = sample_finding(dest.read_text(errors="replace"), what=f"accessibility query took {took:.0f}s")
             f.round, f.evidence = r, [str(dest.relative_to(self.run.path))]
             self.add_finding(f)
+        self.app.kill()
+        self.app.launch()
+        return True
 
     def rounds_loop(self):
         from harness.flows import trio as F
@@ -489,7 +493,8 @@ class Lane:
             self.rounds.append({"round": r, "intensity": intensity, "actions": applied, **metrics, **res})
             log(f"round {r}: {applied} actions applied; recovery {'ok' if res['ok'] else 'FAILED'} "
                 f"({res.get('stage')}, {res.get('seconds')}s)")
-            if not res["ok"]:
+            # a hung app cannot reconnect either: the hang is the finding, not TandemKit
+            if not self.check_hang(r) and not res["ok"]:
                 ev = []
                 if self.ui is not None:
                     shot = self.run.shot_path(f"round-{r:02d}-no-recovery")
@@ -511,7 +516,6 @@ class Lane:
                     signature=[res["stage"]], component="TandemKit", round=r, evidence=ev,
                     details=json.dumps({"recovery check": res, "faketandem state after it": pump}, indent=2,
                                        default=str)))
-            self.check_hang(r)
             self.check_app(r)
             self.scan_stderr()
         return r
