@@ -41,7 +41,7 @@ simulator. A run that finds the lane held exits with 4 and names the holder; wit
 | faketandem | Started on two free loopback ports. Set to `PairStep2` with a random 32-byte long-term key over its websocket. | `tkstress/faketandem.py` |
 | simulator | Its own simulator, `TandemKitStress` (`TH_SIM_NAME`), so it never reinstalls the app a trio-test-harness job is using. Fresh install, onboarding pre-seeded, and three files written into the container. `Documents/PumpManagerState.plist` holds a TandemPumpManager already paired with that key. `freeaps/freeaps_settings.json` sets closed loop and the Glucose Simulator. `preferences.json` and `settings/` set max IOB 3, SMB always, and a basal of 0.85 U/hr to match faketandem. Settings overlay the defaults bundled in the built app. | `tkstress/seed.py` |
 | launch | `simctl launch --stdout/--stderr=<run>/app/launch-NN.*` with `SIMCTL_CHILD_TANDEMKIT_VIRTUAL_PUMP=<faketandem>` and `TSAN_OPTIONS`, plus the toolchain's clang runtime directory as `DYLD_FALLBACK_LIBRARY_PATH` in case the sanitizer runtime was not embedded. TandemKit's OSLog is streamed to `tandemkit-oslog.txt`. WebDriverAgent comes up if it can, and the Glucose Simulator is added through the UI if the seeded setting did not take. A WebDriverAgent started from another harness checkout turns UI actions off: WDA always listens on port 8100, so its taps would land on that checkout's simulator. | `tkstress/app.py`, `lane.py` |
-| rounds | `--round-minutes` of chaos, then every fault undone, then the recovery check. A dead app is a finding and is relaunched. A slow accessibility query from a live app is sampled as a possible hang. The app's resident memory and thread count are recorded per round (the summary shows first, last and peak). | `chaos.py`, `recovery.py` |
+| rounds | `--round-minutes` of chaos, then every fault undone, then the recovery check. A dead app is a finding and is relaunched. A live app slow to answer (an accessibility query, or without WebDriverAgent the quiesce's `simctl launch` of the running app) is sampled as a possible hang and, unless its main thread is waiting for events, relaunched. The app's resident memory and thread count are recorded per round (the summary shows first, last and peak). | `chaos.py`, `recovery.py` |
 | collection | Sanitizer and Main Thread Checker reports from every launch's stderr. `Trio*.ips` from `~/Library/Logs/DiagnosticReports`. TandemKit's and Trio's log files. faketandem's request log, appended per round to `faketandem-requests.jsonl`. | `detect.py`, `lane.py` |
 
 How the pump gets paired without UI:
@@ -65,16 +65,17 @@ Each run leaves `summary.md`, `result.json` and `findings.json` in `runs/<ts>-st
 
 | kind | detected by | fingerprint |
 |---|---|---|
-| `tsan` / `asan` | sanitizer reports on the app's stderr | report kind + the top 3 non-system frames of the access and the conflicting access, in either order for TSan, which prints the later access first (allocation, thread creation and mutex stacks are left out) |
+| `tsan` / `asan` | sanitizer reports on the app's stderr | report kind + the top 3 non-system frames of the access and the conflicting access, in either order (allocation, thread creation and mutex stacks are left out) |
 | `main-thread` | Main Thread Checker on stderr (`--main-thread-checker`) | API + top 3 app frames |
 | `crash` | `Trio*.ips` written during the run (skipping SIGKILL/SIGTERM of a pid the harness ended) | exception + top 4 non-system frames of the crashed thread |
 | `app-died` | the app's pid gone without the harness ending it | (one per run; the crash report carries the detail) |
 | `no-recovery` | after a round's faults are undone, either no authenticated session within `--session-timeout`, or a `remainingInsulin` qualifying event (whose handler only reads `InsulinStatusRequest`) not answered within `--probe-timeout` | the stage that failed |
-| `hang` | a WebDriverAgent query to the live app slower than `--hang-seconds`; `sample` of the process | deepest 3 app frames of the main thread |
+| `hang` | a WebDriverAgent query to the live app slower than `--hang-seconds` (without WebDriverAgent, `simctl launch` of the running app timing out); `sample` of the process, unless its main thread is waiting in its run loop; then the app is relaunched, and the round files no `no-recovery` | deepest 3 app frames of the main thread; or, when a thread sat in ThreadSanitizer's race report for the whole sample, the access it was reporting (the runtime can deadlock symbolizing a report, which never prints) |
 | `build` | xcodebuild fails | first compiler error, paths and line numbers removed |
 
 Fingerprints use function names only, so the same race on a later commit, or with the code moved a few lines, maps
-to the same issue. Frames are classed as TandemKit / Trio / LoopKit / other from module and path, and the class is
+to the same issue. A finding whose signature rule changed also carries the fingerprint the old rule gave it
+(`aliases`), so its open issue keeps getting its sightings. Frames are classed as TandemKit / Trio / LoopKit / other from module and path, and the class is
 the finding's `component`.
 
 ## Chaos
@@ -184,3 +185,6 @@ confirm:
 - the bundled defaults living at `Trio.app/json/defaults/`
 - simulator crash reports landing in `~/Library/Logs/DiagnosticReports`
 - the Main Thread Checker dylib path (hence opt-in)
+- a live, idle app's `sample` showing its main thread in `__CFRunLoopServiceMachPort` for most of it, which is how
+  the hang check tells a slow probe from a stuck main thread (`tests/fixtures/trio-idle-sample.txt` is written from
+  the format, not captured)

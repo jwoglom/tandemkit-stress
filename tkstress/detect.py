@@ -109,9 +109,11 @@ class Finding:
     fp: str = ""
     rounds: list[int] = field(default_factory=list)     # every round it was seen in
     context: dict[str, str] = field(default_factory=dict)  # captured when first seen, for the issue (lane.capture_context)
+    aliases: list[str] = field(default_factory=list)    # fingerprints the same finding had before its signature changed
 
     def __post_init__(self):
         self.fp = self.fp or fingerprint(self.kind, *self.signature)
+        self.aliases = [a for a in self.aliases if a != self.fp]
 
 
 class Findings:
@@ -161,20 +163,23 @@ SAN_FRAME = re.compile(r"^\s*#\d+\s+(?:0x[0-9a-f]+\s+in\s+)?(?P<sym>.+?)"
 SAN_START = re.compile(r"^(?:==\d+==)?\s*(?:WARNING|ERROR): (ThreadSanitizer|AddressSanitizer): (.+?)(?: \(pid=\d+\))?\s*$")
 # Stacks whose frames identify a race: the access and the conflicting one. Allocation sites, thread creation and
 # mutex acquisition stacks say where, not what, and change with unrelated refactors.
-# A Swift access race heads its stacks "Modifying access of Swift variable" / "Read-only access of …".
-ACCESS_STACK = re.compile(r"^\s{2}(?:Previous |Atomic )*(?:[Aa]tomic )?(?:read|write|Read|Write|[Mm]odifying)\b|"
+ACCESS_STACK = re.compile(r"^\s{2}(?:Previous |Atomic )*(?:[Aa]tomic )?(?:read|write|Read|Write|[Mm]odifying access)\b|"
                           r"^(?:READ|WRITE) of size|^freed by thread|^previously allocated by")
+# ACCESS_STACK before it read Swift's "Modifying access" stacks; open issues still carry fingerprints made with it.
+LEGACY_ACCESS_STACK = re.compile(r"^\s{2}(?:Previous |Atomic )*(?:[Aa]tomic )?(?:read|write|Read|Write)\b|"
+                                 r"^(?:READ|WRITE) of size|^freed by thread|^previously allocated by")
 
 
 def parse_sanitizer_reports(text: str) -> list[dict]:
-    """Every sanitizer report in `text`: {"tool", "kind", "summary", "stacks": [[Frame]], "text"}."""
+    """Every sanitizer report in `text`: {"tool", "kind", "summary", "stacks": [[Frame]], "legacy": [bool], "text"}.
+    `legacy[i]` is whether LEGACY_ACCESS_STACK would have taken `stacks[i]`."""
     reports: list[dict] = []
     cur: dict | None = None
     for i, line in enumerate(text.splitlines()):
         m = SAN_START.match(line)
         if m:
-            cur = {"tool": m.group(1), "kind": m.group(2).strip(), "summary": "", "stacks": [], "lines": [line],
-                   "_take": True, "start": i, "complete": False}
+            cur = {"tool": m.group(1), "kind": m.group(2).strip(), "summary": "", "stacks": [], "legacy": [],
+                   "lines": [line], "_take": True, "_legacy": True, "start": i, "complete": False}
             reports.append(cur)
             continue
         if cur is None:
@@ -190,6 +195,7 @@ def parse_sanitizer_reports(text: str) -> list[dict]:
             if cur["_take"]:
                 if not cur["stacks"] or cur.get("_new_stack"):
                     cur["stacks"].append([])
+                    cur["legacy"].append(cur["_legacy"])
                     cur["_new_stack"] = False
                 loc = fm.group("loc") or ""
                 cur["stacks"][-1].append(Frame(fm.group("sym").strip(), fm.group("mod"),
@@ -198,34 +204,35 @@ def parse_sanitizer_reports(text: str) -> list[dict]:
         stripped = line.strip()
         if stripped:
             # a section header starts the next stack; only access stacks (or the first stack of a non-race report) count
-            cur["_take"] = bool(ACCESS_STACK.match(line)) or (cur["tool"] == "AddressSanitizer" and not cur["stacks"])
+            first_asan = cur["tool"] == "AddressSanitizer" and not cur["stacks"]
+            cur["_take"] = bool(ACCESS_STACK.match(line)) or first_asan
+            cur["_legacy"] = bool(LEGACY_ACCESS_STACK.match(line)) or first_asan
             cur["_new_stack"] = True
     for r in reports:
         r["text"] = "\n".join(r.pop("lines"))
-        r.pop("_take", None)
-        r.pop("_new_stack", None)
+        for k in ("_take", "_legacy", "_new_stack"):
+            r.pop(k, None)
     return reports
+
+
+def _stack_signature(stack: list[Frame], top: int) -> list[str]:
+    return [f.short() for f in ([f for f in stack if f.interesting][:top] or stack[:top])]
 
 
 def sanitizer_finding(report: dict, *, top: int = 3) -> Finding:
     kind = "tsan" if report["tool"] == "ThreadSanitizer" else "asan"
-
-    def keep(stack: list[Frame]) -> list[str]:
-        return [f.short() for f in ([f for f in stack if f.interesting][:top] or stack[:top])]
-
     stacks = report["stacks"][:2]
-    if kind == "tsan":
-        # TSan prints the later access first, and either thread can be the later one.
-        stacks = sorted(stacks, key=keep)
-    sig: list[str] = [report["kind"]]
-    frames_all: list[Frame] = []
-    for stack in stacks:
-        sig += keep(stack)
-        frames_all += stack
+    frames_all = [f for stack in stacks for f in stack]
+    # TSan prints the access it caught first, and either side of one race can be the one caught
+    sig = [report["kind"], *(s for part in sorted(_stack_signature(st, top) for st in stacks) for s in part)]
+    legacy = [st for st, old in zip(report["stacks"], report.get("legacy", [])) if old][:2]
+    legacy_sig = [s for st in legacy for s in _stack_signature(st, top)]
     lead = next((f for f in frames_all if f.interesting), frames_all[0] if frames_all else None)
     title = f"{report['tool']}: {report['kind']}" + (f" in {demangle(lead.symbol)}" if lead else "")
+    # A frameless legacy signature lumped every such race into one issue; nothing should keep filing there.
     return Finding(kind=kind, title=title[:200], signature=sig, component=component_of(frames_all),
-                   details=report["text"][:40000])
+                   details=report["text"][:40000],
+                   aliases=[fingerprint(kind, report["kind"], *legacy_sig)] if legacy_sig else [])
 
 
 # ---------------- Main Thread Checker -----------------
@@ -355,18 +362,83 @@ def stderr_reports(text: str) -> list[tuple[int, bool, Finding]]:
             + [(i, i + 60 <= n, f) for i, f in _main_thread_checker_reports(text)])
 
 
+# "    2580 Thread_1234   DispatchQueue_1: com.apple.main-thread  (serial)"
+SAMPLE_THREAD = re.compile(r"^\s*(\d+)\s+(Thread_\d+.*?)\s*$")
+# "    +   2580 main  (in Trio.debug.dylib) + 100  [0x100002000]": the count's column is the depth in the call tree
+SAMPLE_FRAME = re.compile(r"^([\s+!:|]*)(\d+)\s+(.+?)\s+\(in ([^)]+)\)")
+
+
+@dataclass
+class SampleThread:
+    name: str
+    samples: int
+    lines: list[str]
+    frames: list[tuple[int, int, Frame]]    # (depth, samples, frame), in the order sample prints them: root first
+
+    def path_to(self, i: int) -> list[Frame]:
+        """frames[i] and its callers, root first."""
+        depth, path = self.frames[i][0], [self.frames[i][2]]
+        for d, _, f in reversed(self.frames[:i]):
+            if d < depth:
+                depth = d
+                path.append(f)
+        return path[::-1]
+
+
+def sample_threads(text: str) -> list[SampleThread]:
+    """Every thread in the call graph of macOS `sample` output."""
+    threads: list[SampleThread] = []
+    for line in text.partition("Call graph:")[2].splitlines():
+        if line.startswith(("Total number in stack", "Binary Images")):
+            break
+        if m := SAMPLE_THREAD.match(line):
+            threads.append(SampleThread(m.group(2), int(m.group(1)), [line.strip()], []))
+        elif threads and line.strip():
+            threads[-1].lines.append(line)
+            if m := SAMPLE_FRAME.match(line):
+                threads[-1].frames.append((len(m.group(1)), int(m.group(2)),
+                                           Frame(m.group(3).strip(), m.group(4).strip())))
+    return threads
+
+
+def _stuck_race_report(threads: list[SampleThread]) -> tuple[SampleThread, Frame] | None:
+    """A thread inside ThreadSanitizer's race report in every sample, and the access it was reporting. The runtime
+    symbolizes a report while it holds its own locks: a thread that holds a lock the symbolizer then needs (dyld's,
+    libc's locale lock), and waits on the runtime, deadlocks the process before the report prints."""
+    for t in threads:
+        for i, (_, n, f) in enumerate(t.frames):
+            if f.symbol.startswith("__tsan::ReportRace") and n == t.samples:
+                access = next((c for c in reversed(t.path_to(i)) if c.interesting), None)
+                if access:
+                    return t, access
+    return None
+
+
+def main_thread_waiting(sample_text: str) -> bool:
+    """Whether the main thread spent most of a `sample` waiting in its run loop for an event, as a live app's does:
+    whatever made a probe slow, the app answers now."""
+    main = next((t for t in sample_threads(sample_text) if "DispatchQueue_1: com.apple.main-thread" in t.name), None)
+    if not main:
+        return False
+    return sum(n for _, n, f in main.frames if f.symbol == "__CFRunLoopServiceMachPort") * 2 > main.samples
+
+
 def sample_finding(sample_text: str, *, what: str) -> Finding:
-    """A hang: the main thread's stack from macOS `sample` output, reduced to its first app frames."""
-    # "    2580 Thread_1234   DispatchQueue_1: com.apple.main-thread  (serial)" up to the next thread's header
-    main = re.search(r"Thread_\d+\s+DispatchQueue_1: com\.apple\.main-thread.*?"
-                     r"(?=\n\s*\d*\s*Thread_\d+|\n\s*Total number|\n\nBinary Images|\Z)", sample_text, re.S)
-    frames: list[Frame] = []
-    for line in (main.group(0) if main else "").splitlines():
-        m = re.search(r"\d+\s+(.+?)\s+\(in ([^)]+)\)", line)
-        if m:
-            frames.append(Frame(m.group(1).strip(), m.group(2).strip()))
+    """A hang from macOS `sample` output: the main thread's stack, reduced to its deepest app frames. When a thread is
+    stuck in ThreadSanitizer's race report it is named by the reported access instead, since either side of the race
+    can be the one caught and the other threads only wait on the runtime."""
+    threads = sample_threads(sample_text)
+    main = next((t for t in threads if "DispatchQueue_1: com.apple.main-thread" in t.name), None)
+    if stuck := _stuck_race_report(threads):
+        t, access = stuck
+        note = f"{t.name.split()[0]} was inside ThreadSanitizer's race report in all {t.samples} samples; it never printed."
+        blocks = [note, "\n".join(t.lines)] + (["\n".join(main.lines)] if main and main is not t else [])
+        return Finding(kind="hang", title=f"ThreadSanitizer deadlocked reporting a race in {access.symbol} ({what})"[:200],
+                       signature=["ThreadSanitizer race report", access.short()], component=component_of([access]),
+                       details="\n\n".join(blocks)[:30000])
+    frames = [f for _, _, f in main.frames] if main else []
     # sample prints the call tree root-first; the deepest frames are the ones that identify the hang
     deepest = [f for f in reversed(frames) if f.interesting][:3]
     return Finding(kind="hang", title=f"Main thread unresponsive ({what})" + (f" in {deepest[0].symbol}" if deepest else ""),
                    signature=[f.short() for f in deepest] or [what], component=component_of(list(reversed(frames))),
-                   details=(main.group(0) if main else sample_text)[:30000])
+                   details=("\n".join(main.lines) if main else sample_text)[:30000])

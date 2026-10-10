@@ -19,7 +19,7 @@ build nor the simulator setup nor collection counts against it.
      onboarding pre-seeded, Trio's settings and a paired Tandem pump written into the container (seed.py), launched
      with TANDEMKIT_VIRTUAL_PUMP=<faketandem> (app.py)
   3. rounds, for --minutes: chaos (chaos.py) for --round-minutes, then every fault undone and the recovery check
-     (recovery.py); a dead app is a finding and is relaunched; the app's memory and thread count are recorded
+     (recovery.py); a dead or hung app is a finding and is relaunched; the app's memory and thread count are recorded
   4. collection: sanitizer and Main Thread Checker reports from every launch's stderr, crash reports, TandemKit's
      OSLog stream and log file, faketandem's request log; findings.json, summary.md, result.json
 
@@ -46,8 +46,8 @@ from pathlib import Path
 from harness.util import HarnessError, log
 from . import CACHE_DIR, HARNESS_DIR
 from .lock import LaneBusy, holder_description
-from .detect import (Finding, Findings, crash_finding, default_crash_dirs, find_crash_reports, parse_ips,
-                     sample_finding, stderr_reports)
+from .detect import (Finding, Findings, crash_finding, default_crash_dirs, find_crash_reports, main_thread_waiting,
+                     parse_ips, sample_finding, stderr_reports)
 
 DEFAULT_TRIO = "nightscout/Trio:feat/tandem-closed-beta"
 DEFAULT_TANDEMKIT = "dev"
@@ -440,24 +440,41 @@ class Lane:
             self.scan_stderr()
             self.app.launch()
 
-    def check_hang(self, r: int) -> None:
-        """A WebDriverAgent query needs the app's main thread; minutes without an answer from a live app is a hang."""
-        if self.ui is None or not self.app.alive():
-            return
-        t = time.time()
-        try:
-            self.ui.find("Settings", exact=True)
-        except Exception:  # noqa: BLE001 - the timing is what matters
-            pass
-        took = time.time() - t
-        if took < self.args.hang_seconds:
-            return
+    def check_hang(self, r: int, *, foreground_timed_out: bool = False) -> bool:
+        """A live app that leaves a WebDriverAgent query (without one, the quiesce's `simctl launch`) unanswered for
+        minutes, and whose sample does not show the main thread waiting for events, is a hang. It is relaunched: a
+        deadlock never clears, and left alone it is sampled again every round."""
+        if not self.app.alive():
+            return False
+        if self.ui is not None:
+            t = time.time()
+            try:
+                self.ui.find("Settings", exact=True)
+            except Exception:  # noqa: BLE001 - the timing is what matters
+                pass
+            took = time.time() - t
+            if took < self.args.hang_seconds:
+                return False
+            what = f"accessibility query took {took:.0f}s"
+        elif foreground_timed_out:
+            what = "simctl launch timed out"
+        else:
+            return False
+        if not self.app.alive():
+            return False
         dest = self.run.path / "hangs" / f"round-{r:02d}.txt"
         dest.parent.mkdir(exist_ok=True)
         if self.app.sample(dest):
-            f = sample_finding(dest.read_text(errors="replace"), what=f"accessibility query took {took:.0f}s")
+            text = dest.read_text(errors="replace")
+            if main_thread_waiting(text):
+                log(f"round {r}: the app was slow to answer, but its main thread is waiting for events: not a hang")
+                return False
+            f = sample_finding(text, what=what)
             f.round, f.evidence = r, [str(dest.relative_to(self.run.path))]
             self.add_finding(f)
+        self.app.kill()
+        self.app.launch()
+        return True
 
     def rounds_loop(self):
         from harness.flows import trio as F
@@ -481,7 +498,9 @@ class Lane:
             log(f"== round {r}: {intensity} chaos for {span / 60:.1f} min")
             recs = self.chaos.run_for(span, should_stop=self.tick)
             self.check_app(r)
-            self.chaos.quiesce()
+            quiesced = self.chaos.quiesce() or []
+            foreground_timed_out = any(x["action"] == "quiesce_app" and x["result"] == "error"
+                                       and "timed out" in x["detail"] for x in quiesced)
             res = recovery.check(self.fk.client, session_timeout=a.session_timeout, probe_timeout=a.probe_timeout)
             self.dump_requests()
             applied = sum(1 for x in recs if x["result"] == "ok" and x["category"] not in ("undo", "quiesce"))
@@ -489,7 +508,8 @@ class Lane:
             self.rounds.append({"round": r, "intensity": intensity, "actions": applied, **metrics, **res})
             log(f"round {r}: {applied} actions applied; recovery {'ok' if res['ok'] else 'FAILED'} "
                 f"({res.get('stage')}, {res.get('seconds')}s)")
-            if not res["ok"]:
+            # a hung app cannot reconnect either: the hang is the finding, not TandemKit
+            if not self.check_hang(r, foreground_timed_out=foreground_timed_out) and not res["ok"]:
                 ev = []
                 if self.ui is not None:
                     shot = self.run.shot_path(f"round-{r:02d}-no-recovery")
@@ -511,7 +531,6 @@ class Lane:
                     signature=[res["stage"]], component="TandemKit", round=r, evidence=ev,
                     details=json.dumps({"recovery check": res, "faketandem state after it": pump}, indent=2,
                                        default=str)))
-            self.check_hang(r)
             self.check_app(r)
             self.scan_stderr()
         return r
