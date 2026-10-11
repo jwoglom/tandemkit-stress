@@ -4,17 +4,20 @@ Stress testing for [TandemKit](https://github.com/jwoglom/TandemKit), the LoopKi
 and t:slim X2. It looks for crashes, data races, hangs and failures to recover. The driver runs inside a real host app
 under load, with its Bluetooth link broken on purpose. Every finding becomes an issue in this repository.
 
-The one lane built so far is Trio on the iOS Simulator against [faketandem](https://github.com/jwoglom/faketandem),
-the Tandem pump emulator. It runs twice every night on a self-hosted Mac, from 2am and from 6am Eastern, each for as
-long as the runner's 4-hour job limit allows, and for as long as asked (an hour by default) when started by hand.
-- **Build:** nightscout/Trio `feat/tandem-closed-beta`, with its TandemKit submodule moved to TandemKit `dev`, built
-  with the virtual pump and ThreadSanitizer.
+The one lane built so far runs the driver inside Trio, or inside Loop with `--host loop`, on the iOS Simulator against
+[faketandem](https://github.com/jwoglom/faketandem), the Tandem pump emulator. It runs twice every night on a
+self-hosted Mac, from 2am Eastern in Trio and from 6am in Loop, each for as long as the runner's 4-hour job limit
+allows, and for as long as asked (an hour by default) when started by hand.
+- **Build:** nightscout/Trio `feat/tandem-closed-beta`, or LoopKit/LoopWorkspace `feat/tandem-closed-beta` for Loop,
+  with its TandemKit submodule moved to TandemKit `dev`, built with the virtual pump and ThreadSanitizer.
 - **Chaos:** seeded pump-side events, link faults, app kills and UI noise. Every round ends with a check that the
   driver reconnected and still answers the pump.
 
-Only simulated devices are involved: faketandem and Trio's Glucose Simulator. No insulin is delivered.
+Only simulated devices are involved: faketandem and the app's simulated CGM (Trio's Glucose Simulator, Loop's CGM
+Simulator). No insulin is delivered. The Loop host has not run on a worker yet; [docs/lane.md](docs/lane.md#not-verified-on-a-mac-yet)
+lists what its first run should confirm.
 [docs/lane.md](docs/lane.md) covers how a run works and what counts as a finding. [docs/roadmap.md](docs/roadmap.md)
-lists the lanes still to build: decoder fuzzing, the driver on Linux, Loop, and the real Mobi.
+lists the lanes still to build: decoder fuzzing, the driver on Linux, and the real Mobi.
 
 ## Running it on a Mac
 
@@ -35,6 +38,7 @@ git clone --recurse-submodules https://github.com/jwoglom/tandemkit-stress && cd
 ./tandemkit-stress run --minutes 200 --file-issues  # build, then about what each nightly job gets
 ./tandemkit-stress build                            # only the build: warm the cache, or check Trio compiles
 ./tandemkit-stress run --tandemkit jwoglom/TandemKit#470 --seed 42 --minutes 30
+./tandemkit-stress run --host loop --minutes 30         # TandemKit inside Loop instead of Trio
 ./tandemkit-stress file-issues runs/<run>           # file a finished run's findings afterwards
 ./tandemkit-stress --help
 ```
@@ -62,7 +66,7 @@ Exit codes:
 | 0 | Clean, or (`build`) built. |
 | 1 | Findings. |
 | 2 | Harness failure, or stopped by a signal (a summary is still written). |
-| 3 | Trio does not build. |
+| 3 | The host app (Trio, or Loop) does not build. |
 | 4 | Another stress run on this Mac held the lane. `--wait` queues behind it instead. |
 | 5 | Nothing was stress-tested: the build stopped at `--build-minutes` (the next build continues from DerivedData), or `--until` left no time for a round. |
 

@@ -122,6 +122,15 @@ class SanitizerReports(unittest.TestCase):
         self.assertNotEqual(f.fp, old)
 
 
+    def test_loop_frames_are_the_loop_component(self):
+        self.assertEqual(D.component_of([D.Frame("StatusTableViewController.reloadData()", "Loop.debug.dylib")]), "Loop")
+        self.assertEqual(D.component_of([D.Frame("LoopDataManager.loop()", "LoopCore")]), "Loop")
+        self.assertEqual(D.component_of([D.Frame("closure", "", "/w/LoopWorkspace/Loop/Loop/Managers/X.swift:3")]),
+                         "Loop")
+        self.assertEqual(D.component_of([D.Frame("TandemPumpManager.sync()", "TandemKit"),
+                                         D.Frame("DeviceDataManager.x()", "Loop.debug.dylib")]), "TandemKit")
+
+
 class CrashAndHangReports(unittest.TestCase):
     def test_crash_details_carry_the_other_threads(self):
         crash = D.parse_ips(FIX / "trio-crash.ips")
@@ -224,6 +233,44 @@ class Seeding(unittest.TestCase):
             self.assertEqual(basal[0]["rate"], S.BASAL_RATE)
             self.assertEqual(S.read_back(container)["freeaps/freeaps_settings.json"]["dosingMode"], "closed")
 
+    def test_loop_starts_onboarded_in_closed_loop_with_a_cgm_that_reads(self):
+        class Sim:
+            def __init__(self, root):
+                self.group = root / "group"
+                (self.group / "Library/Preferences").mkdir(parents=True)
+                (self.group / ".com.apple.mobile_container_manager.metadata.plist").write_bytes(b"")
+                (self.group / "Model.sqlite").write_text("an earlier install's store")
+                self.prefs_dropped = 0
+
+            def app_group_containers(self, bundle_id):
+                return {"group.com.example.loopkit.LoopGroup": self.group}
+
+            def terminate(self, bundle_id):
+                pass
+
+            def drop_preferences_cache(self):
+                self.prefs_dropped += 1
+                return []
+
+        with tempfile.TemporaryDirectory() as d:
+            sim, container = Sim(Path(d)), Path(d, "data")
+            prefs_path, cgm_path = S.seed_loop(sim, container, "com.example.loopkit.Loop")
+            prefs = plistlib.loads(prefs_path.read_bytes())
+            settings = prefs["com.loopkit.Loop.loopSettings"]
+            self.assertTrue(prefs["com.loopkit.Loop.OnboardingManager.IsComplete"])
+            self.assertEqual((settings["dosingEnabled"], settings["dosingStrategy"]), (True, S.LOOP_AUTOMATIC_BOLUS))
+            self.assertEqual((settings["maximumBolus"], settings["maximumBasalRatePerHour"]), (S.MAX_BOLUS, S.MAX_BASAL))
+            self.assertEqual(prefs["com.loudnate.Naterade.BasalRateSchedule"]["items"][0]["value"], S.BASAL_RATE)
+            self.assertFalse((sim.group / "Model.sqlite").exists())
+            self.assertTrue((sim.group / ".com.apple.mobile_container_manager.metadata.plist").exists())
+            self.assertGreaterEqual(sim.prefs_dropped, 1)
+            cgm = plistlib.loads(cgm_path.read_bytes())
+            self.assertEqual(cgm["managerIdentifier"], "MockCGMManager")
+            model = cgm["state"]["dataSource"]["model"]
+            self.assertEqual((model["kind"], model["baseGlucose"]), ("sineCurve", S.LOOP_GLUCOSE["base"]))
+            self.assertEqual(S.loop_read_back(prefs_path), {"onboardingComplete": True, "legacySettingsMigrated": False})
+            self.assertEqual(S.loop_read_back(None), {"preferences": None})
+
 
 class FakePump:
     """Enough of harness.faketandem.Client for the chaos actions."""
@@ -316,6 +363,13 @@ class Chaos(unittest.TestCase):
         with self.assertRaises(HarnessError):
             C.Chaos(C.ChaosContext(random.Random(1), FakePump(), FakeControl()), categories={"ui"})
 
+    def test_ui_actions_follow_the_host_app(self):
+        def ui_actions(host):
+            ctx = C.ChaosContext(random.Random(1), FakePump(), FakeControl(), ui=object(), host=host)
+            return {a.name for a in C.Chaos(ctx, categories={"ui"}).actions}
+        self.assertEqual(ui_actions("trio"), {"ui_pump_settings", "ui_tab_hop"})
+        self.assertEqual(ui_actions("loop"), {"ui_loop_pump_settings", "ui_chart_hop"})
+
 
 class Issues(unittest.TestCase):
     def test_scrub(self):
@@ -360,6 +414,25 @@ class Issues(unittest.TestCase):
         a = build_failure("/Users/a/Trio/TandemKit/X.swift:10:5: error: cannot find 'foo' in scope", "t", "dev")
         b = build_failure("/Volumes/w/Trio/TandemKit/X.swift:12:9: error: cannot find 'foo' in scope", "t", "dev")
         self.assertEqual(a.fp, b.fp)
+
+    def test_a_loop_build_break_is_not_trios(self):
+        from tkstress import hosts
+        from tkstress.lane import build_failure
+        error = "/x/TandemKit/X.swift:10:5: error: cannot find 'foo' in scope"
+        trio, loop = build_failure(error, "t", "dev"), build_failure(error, "l", "dev", hosts.LOOP)
+        self.assertNotEqual(trio.fp, loop.fp)
+        self.assertTrue(loop.title.startswith("Loop (l)"))
+
+    def test_a_loop_run_reproduces_with_its_host(self):
+        f = D.Finding(kind="tsan", title="race", signature=["data race", "TandemKit`x"], component="TandemKit")
+        meta = {"seed": 5, "args": {"host": "loop", "loop": "LoopKit/LoopWorkspace:feat/tandem-closed-beta",
+                                    "trio": "nightscout/Trio:feat/tandem-closed-beta", "tandemkit": "dev",
+                                    "sanitizer": "thread", "intensity": "medium"},
+                "git": {"sha": "abc", "submodules": {"TandemKit": "def"}}, "faketandem": {"ref": "main", "sha": "123"}}
+        body = I.issue_body(asdict(f), meta, Path("."))
+        self.assertIn("--host loop --loop LoopKit/LoopWorkspace:feat/tandem-closed-beta --tandemkit def", body)
+        self.assertIn("- Loop: `LoopKit/LoopWorkspace:feat/tandem-closed-beta` @ `abc`", body)
+        self.assertIn("CGM Simulator", body)
 
 
 class Lock(unittest.TestCase):
@@ -590,6 +663,30 @@ class Lane(unittest.TestCase):
                 (app / "Trio").write_bytes(b"another build")
                 with self.assertRaises(HarnessError):
                     lane.load_build()
+
+    def test_a_loop_build_is_made_from_loopworkspace_and_stressed_as_loop(self):
+        from unittest import mock
+        from harness import build as B
+        from tkstress import hosts
+        from tkstress import lane as L
+        from tkstress.cli import build_parser
+        with tempfile.TemporaryDirectory() as d:
+            app, patches = self._fake_build_env(d)
+            with contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()):
+                mocks = [stack.enter_context(pt) for pt in patches]
+                prepare, build = mocks[3], mocks[4]
+                code = L.Lane(build_parser().parse_args(["build", "--host", "loop", "--tandemkit", "x"])).execute()
+                self.assertEqual(code, L.EXIT_CLEAN)
+                self.assertEqual(prepare.call_args.kwargs["branch"], L.DEFAULT_LOOP)
+                self.assertEqual((prepare.call_args.kwargs["app"], build.call_args.kwargs["app"]), ("loop", "loop"))
+                run_dir = next(Path(d).glob("*-stress-loop-x"))
+                self.assertEqual(json.loads((run_dir / "build.json").read_text())["host"], "loop")
+                lane = L.Lane(build_parser().parse_args(["run", "--build", str(run_dir), "--minutes", "10"]))
+                lane.run = L.open_run(run_dir)
+                lane.load_build()
+                self.assertIs(lane.host, hosts.LOOP)
+                self.assertEqual(lane.run.meta["args"]["host"], "loop")
+                self.assertEqual(lane.host_flags(), f"--host loop --loop {L.DEFAULT_LOOP}")
 
     def test_a_build_stopped_at_its_limit_is_incomplete(self):
         from harness import build as B

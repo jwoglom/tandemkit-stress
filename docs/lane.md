@@ -1,4 +1,4 @@
-# TandemKit stress lane: Trio on the simulator against faketandem
+# TandemKit stress lane: Trio or Loop on the simulator against faketandem
 
 `./tandemkit-stress run` looks for crashes, data races, hangs and failures to recover in TandemKit while it runs inside
 Trio, by putting the driver under load and breaking its link on purpose. It builds Trio with its TandemKit
@@ -10,6 +10,7 @@ stress clock starts at the first round: neither the build nor the simulator setu
 
 ```
 ./tandemkit-stress run                                     # build closed-beta Trio + TandemKit dev, then 60 min of stress
+./tandemkit-stress run --host loop                         # the same in Loop (LoopKit/LoopWorkspace feat/tandem-closed-beta)
 ./tandemkit-stress run --minutes 200                       # about what each nightly job gets
 ./tandemkit-stress run --minutes 200 --file-issues         # the same by hand, filing through your `gh` login
 ./tandemkit-stress run --minutes 25 --seed 42 --intensity high
@@ -31,6 +32,29 @@ simulator. A run that finds the lane held exits with 4 and names the holder; wit
 - **Issues from a hand-started run.** `--file-issues` files them at the end through the local `gh` login. `gh`'s
   access to the repository is checked before the run starts.
 - **Sleep.** The run holds a `caffeinate` assertion against idle sleep.
+
+## Loop (`--host loop`)
+
+The same lane with Loop as the host app (`--host loop`, or `TKSTRESS_HOST=loop` in `stress.env`), built from
+LoopKit/LoopWorkspace `feat/tandem-closed-beta` (`--loop`), its TandemKit submodule moved to `--tandemkit`. It covers what Trio does not: TandemKit against upstream LoopKit rather
+than Trio's loopandlearn fork, the `TandemKitPlugin.loopplugin` build, and Loop's own dosing loop and dose store.
+The driver, faketandem, the pump and link chaos and the recovery check are the same; what differs (`tkstress/hosts.py`):
+- **Build.** trio-test-harness's Loop profile (`harness/apps.py`): the `LoopWorkspace` scheme, its own checkout and
+  DerivedData in the cache (`LOOP_REPO`, `TH_LOOP_DERIVED_DATA`), `build/override-loop-sim-tandemkit_virtual_pump-sanitized.xcconfig`.
+- **Seeding** (`seed.seed_loop`, through the harness's Loop flows): the app group the simulator keeps across
+  reinstalls is emptied; onboarding and the therapy settings go into its preferences as the legacy keys Loop migrates
+  at launch (closed loop, automatic boluses, basal 0.85 U/hr, max basal 2 U/hr, max bolus 10 U), and the simulator's
+  `cfprefsd` is restarted so Loop reads them; `Documents/CGMManagerState.plist` restores a CGM Simulator on a sine
+  curve between 80 and 200 mg/dL, a reading a minute; `Documents/PumpManagerState.plist` is the same paired
+  TandemPumpManager as Trio's.
+- **UI.** Loop asks for notifications, Apple Health and Bluetooth after onboarding; WebDriverAgent answers them before
+  the first round. If Loop opens on its welcome screen instead, the seed did not take: the walk skips onboarding with
+  LoopOnboarding's mock settings (open loop), and the summary and `run.json` (`seed_taken: false`) say so. Its UI actions open TandemKit's settings from Loop's Settings, and Loop's charts (Active Insulin and
+  Insulin Delivery list the doses DoseStore holds), instead of Trio's settings path and tabs.
+- **Reports.** Crash reports are `Loop*.ips`; frames in Loop, LoopCore and LoopUI are the `Loop` component. A build
+  break and an unexpected exit carry the host in their signature, so they are Loop's own issues; a race or crash in
+  TandemKit's frames has the same fingerprint in both hosts. `run.json` `loop_settings_after` says whether Loop kept
+  the seeded onboarding and migrated the settings.
 
 ## How a run goes
 
@@ -55,7 +79,7 @@ Exit codes:
 | 0 | Clean, or (`build`) built. |
 | 1 | Findings. |
 | 2 | Harness or setup failure, or stopped by a signal (status `interrupted`; a summary is still written). |
-| 3 | Trio does not build against that TandemKit. |
+| 3 | The host app (Trio, or Loop with `--host loop`) does not build against that TandemKit. |
 | 4 | Not run: another stress run on this machine held the lane. |
 | 5 | Not run: the build stopped at `--build-minutes` (status `build-incomplete`; the next build continues from DerivedData), or `--until` left no time for a round (status `no-time`). |
 
@@ -102,8 +126,8 @@ workflow with no trigger of its own; both of them call it.
 
 | Workflow | Trigger | Build limit | Stress |
 |---|---|---|---|
-| `stress-sim-nightly.yml` | 02:00 and 06:00 America/New_York every night (the schedule's `timezone`, so it follows daylight saving) | 120 minutes | until 20 minutes before the runner's limit: about 3 hours 20 after a warm build |
-| `stress-sim-manual.yml` | `workflow_dispatch`, with inputs for the TandemKit ref, seed, intensity, sanitizer and chaos categories | `build_minutes`, 120 by default | `minutes`, 60 by default, cut at the same point |
+| `stress-sim-nightly.yml` | 02:00 (Trio) and 06:00 (Loop) America/New_York every night (the schedule's `timezone`, so it follows daylight saving) | 120 minutes | until 20 minutes before the runner's limit: about 3 hours 20 after a warm build |
+| `stress-sim-manual.yml` | `workflow_dispatch`, with inputs for the host app, the TandemKit ref, seed, intensity, sanitizer and chaos categories | `build_minutes`, 120 by default | `minutes`, 60 by default, cut at the same point |
 
 - **Two steps.** The job's Build step runs `tandemkit-stress build --build-minutes …`, and its Stress step runs
   `tandemkit-stress run --build <that run directory> --minutes …` only if the build finished. The job is green
@@ -125,8 +149,8 @@ workflow with no trigger of its own; both of them call it.
   run started while one waits replaces it.
 - **Runs started by hand.** The concurrency group does not cover a run started by hand on the runner's Mac; the
   lane lock does. A job that finds the lane held fails with "lane busy".
-- **Persistent cache.** `TRIO_REPO`, `TH_DERIVED_DATA` and `TH_BUILD_DIR` live in the lane's cache, which survives
-  between jobs: `/Volumes/work/cache/tandemkit-stress` where that volume is writable, else
+- **Persistent cache.** `TRIO_REPO`, `TH_DERIVED_DATA`, `LOOP_REPO`, `TH_LOOP_DERIVED_DATA` and `TH_BUILD_DIR` live in
+  the lane's cache, which survives between jobs: `/Volumes/work/cache/tandemkit-stress` where that volume is writable, else
   `~/Library/Caches/tandemkit-stress`. A warm build is incremental (usually only TandemKit changed). A cold one with
   TSan is long; if it reaches the build limit, the next run continues it.
 - **Checkouts and tokens.** This repository is checked out with the job's own token. trio-test-harness is checked
@@ -188,3 +212,11 @@ confirm:
 - a live, idle app's `sample` showing its main thread in `__CFRunLoopServiceMachPort` for most of it, which is how
   the hang check tells a slow probe from a stuck main thread (`tests/fixtures/trio-idle-sample.txt` is written from
   the format, not captured)
+
+Loop (`--host loop`, added 2026-10-11) has not run on a worker at all. Its first run should also confirm:
+- LoopWorkspace building with the virtual pump and TSan through the harness (its plugins and watch app included),
+  and how long a cold build takes against `build_minutes`
+- Loop reading the seeded preferences once `cfprefsd` restarts (`loop_settings_after`), restoring the seeded pump and
+  CGM Simulator, and closing the loop on them (temp basals and automatic boluses in faketandem's request log)
+- WebDriverAgent answering Loop's notification, Apple Health and Bluetooth prompts, and the Loop UI actions finding
+  "Tandem" in Settings and the chart titles

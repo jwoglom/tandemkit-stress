@@ -1,6 +1,8 @@
-"""`tandemkit-stress build` and `tandemkit-stress run`: Trio on the iOS Simulator against faketandem, with chaos.
+"""`tandemkit-stress build` and `tandemkit-stress run`: Trio (or, with --host loop, Loop) on the iOS Simulator against
+faketandem, with chaos.
 
     ./tandemkit-stress run                          # build closed-beta Trio + TandemKit dev, then 60 min of stress
+    ./tandemkit-stress run --host loop              # the same in Loop: LoopKit/LoopWorkspace feat/tandem-closed-beta
     ./tandemkit-stress run --minutes 200            # about what each nightly job gets
     ./tandemkit-stress run --minutes 20 --seed 42 --intensity high
     ./tandemkit-stress run --tandemkit jwoglom/TandemKit#470   # a TandemKit PR instead of dev
@@ -11,20 +13,20 @@
 
 The build is its own stage, and --minutes is the stress alone: the clock starts at the first round, so neither the
 build nor the simulator setup nor collection counts against it.
-  1. build (`build`, or the start of `run`): faketandem fetched and built (tkstress/faketandem.py), then Trio with
-     its TandemKit submodule moved to the requested ref, compiled with TANDEMKIT_VIRTUAL_PUMP (CoreBluetooth
-     replaced by a socket to faketandem) and, by default, ThreadSanitizer. build.json in the run directory records
-     what was built, for `run --build`.
+  1. build (`build`, or the start of `run`): faketandem fetched and built (tkstress/faketandem.py), then the host app
+     (Trio, or LoopWorkspace for Loop; tkstress/hosts.py) with its TandemKit submodule moved to the requested ref,
+     compiled with TANDEMKIT_VIRTUAL_PUMP (CoreBluetooth replaced by a socket to faketandem) and, by default,
+     ThreadSanitizer. build.json in the run directory records what was built, for `run --build`.
   2. setup: faketandem started on two free loopback ports with a random long-term key staged; fresh install,
-     onboarding pre-seeded, Trio's settings and a paired Tandem pump written into the container (seed.py), launched
-     with TANDEMKIT_VIRTUAL_PUMP=<faketandem> (app.py)
+     onboarding pre-seeded, the app's settings and a paired Tandem pump written into its containers (seed.py),
+     launched with TANDEMKIT_VIRTUAL_PUMP=<faketandem> (app.py)
   3. rounds, for --minutes: chaos (chaos.py) for --round-minutes, then every fault undone and the recovery check
      (recovery.py); a dead or hung app is a finding and is relaunched; the app's memory and thread count are recorded
   4. collection: sanitizer and Main Thread Checker reports from every launch's stderr, crash reports, TandemKit's
      OSLog stream and log file, faketandem's request log; findings.json, summary.md, result.json
 
-Exit codes: 0 clean (`build`: built), 1 findings, 2 harness/setup failure (or stopped by a signal), 3 Trio does not
-build against that TandemKit, 4 another stress run on this machine holds the lane (tkstress/lock.py; --wait queues),
+Exit codes: 0 clean (`build`: built), 1 findings, 2 harness/setup failure (or stopped by a signal), 3 the host app does
+not build against that TandemKit, 4 another stress run on this machine holds the lane (tkstress/lock.py; --wait queues),
 5 nothing was stress-tested: the build stopped at --build-minutes (the next build continues from DerivedData), or
 --until left no time for a round.
 """
@@ -45,11 +47,13 @@ from pathlib import Path
 
 from harness.util import HarnessError, log
 from . import CACHE_DIR, HARNESS_DIR
+from . import hosts
 from .lock import LaneBusy, holder_description
 from .detect import (Finding, Findings, crash_finding, default_crash_dirs, find_crash_reports, main_thread_waiting,
                      parse_ips, sample_finding, stderr_reports)
 
-DEFAULT_TRIO = "nightscout/Trio:feat/tandem-closed-beta"
+DEFAULT_TRIO = hosts.TRIO.default_source
+DEFAULT_LOOP = hosts.LOOP.default_source
 DEFAULT_TANDEMKIT = "dev"
 EXIT_CLEAN, EXIT_FINDINGS, EXIT_HARNESS, EXIT_BUILD, EXIT_BUSY, EXIT_INCOMPLETE = 0, 1, 2, 3, 4, 5
 FAILURE_KINDS = {"crash", "tsan", "asan", "main-thread", "no-recovery", "hang", "app-died"}
@@ -108,14 +112,16 @@ def tandemkit_spec(ref: str) -> str:
     return ref if ("/" in ref or "#" in ref or ref.startswith("http")) else f"TandemKit@{ref}"
 
 
-def build_failure(errors: str, trio: str, tandemkit: str) -> Finding:
-    """One issue per distinct break: keyed on the first compiler error with paths and line numbers removed."""
+def build_failure(errors: str, source: str, tandemkit: str, host: hosts.Host = hosts.TRIO) -> Finding:
+    """One issue per distinct break: keyed on the first compiler error with paths and line numbers removed. Loop builds
+    TandemKit against another LoopKit than Trio's, so its breaks are its own."""
     first = next((l for l in errors.splitlines() if re.search(r"(?:^|: )error: ", l)),
                  errors.strip().splitlines()[0] if errors.strip() else "")
     norm = re.sub(r"(/[^\s:]+/)", "", first)
     norm = re.sub(r":\d+(:\d+)?", "", norm).strip()
-    return Finding(kind="build", title=f"Trio ({trio}) does not build against TandemKit {tandemkit}"[:200],
-                   signature=[norm[:300]], component="TandemKit", details=errors[-6000:])
+    return Finding(kind="build", title=f"{host.name} ({source}) does not build against TandemKit {tandemkit}"[:200],
+                   signature=[norm[:300], *([f"host {host.key}"] if host is not hosts.TRIO else [])],
+                   component="TandemKit", details=errors[-6000:])
 
 
 def tail_lines(path: Path, n: int, max_bytes: int = 400_000) -> list[str]:
@@ -198,6 +204,22 @@ class Lane:
         self.stderr_seen: set[tuple[str, int]] = set()
         self.stderr_sizes: dict[str, int] = {}
         self.last_scan = 0.0
+        self.loop_prefs: Path | None = None
+        self.seed_note = ""
+
+    @property
+    def host(self) -> hosts.Host:
+        return hosts.get(getattr(self.args, "host", None))
+
+    @property
+    def source(self) -> str:
+        return hosts.source_of(self.args)
+
+    def host_flags(self) -> str:
+        """The --host/--trio/--loop flags that build this run's app again."""
+        if self.host is hosts.TRIO:
+            return f"--trio {self.source}"
+        return f"--host {self.host.key} --{self.host.key} {self.source}"
 
     def left(self) -> float:
         return self.deadline - time.time() if self.deadline else float("inf")
@@ -285,21 +307,21 @@ class Lane:
             info = plistlib.loads((app / "Info.plist").read_bytes())
             self.run.update_meta(git={"note": "prebuilt app; commits unknown"})
             return app, info["CFBundleIdentifier"], None
-        src, info = B.prepare_source(branch=a.trio, submodules=[tandemkit_spec(a.tandemkit)])
+        src, info = B.prepare_source(branch=self.source, submodules=[tandemkit_spec(a.tandemkit)], app=self.host.key)
         self.run.update_meta(git={k: info.get(k) for k in ("branch", "sha", "describe", "submodules",
                                                             "submodule_overrides")})
         try:
             bi = B.build(src, "sim", configuration="Debug", git_info=info, log_path=self.run.path / "xcodebuild.log",
                          conditions=("TANDEMKIT_VIRTUAL_PUMP",), sanitizer=None if a.sanitizer == "none" else a.sanitizer,
-                         save=False, timeout=a.build_minutes * 60 if a.build_minutes else None)
+                         save=False, timeout=a.build_minutes * 60 if a.build_minutes else None, app=self.host.key)
         except B.BuildTimeout as e:
             raise _Stop("build-incomplete", f"{e}. Nothing was stress-tested; the next build continues from "
                         "DerivedData.", EXIT_INCOMPLETE) from None
         except HarnessError as e:
-            f = build_failure(str(e), a.trio, a.tandemkit)
+            f = build_failure(str(e), self.source, a.tandemkit, self.host)
             f.context = {"xcodebuild log (last 150 lines)": "\n".join(tail_lines(self.run.path / "xcodebuild.log", 150))}
             self.add_finding(f)
-            raise _Stop("build-failed", "Trio did not build against this TandemKit", EXIT_BUILD) from None
+            raise _Stop("build-failed", f"{self.host.name} did not build against this TandemKit", EXIT_BUILD) from None
         return Path(bi.app_path), bi.bundle_id, bi.xcode
 
     def build_phase(self) -> tuple[Path, str]:
@@ -308,7 +330,8 @@ class Lane:
         self.prepare_faketandem()
         app, bundle_id, xcode = self.checkout_and_build()
         build = {"app": str(app), "bundle_id": bundle_id, "stamp": app_stamp(app), "xcode": xcode,
-                 "trio": a.trio, "tandemkit": a.tandemkit, "sanitizer": a.sanitizer,
+                 "host": self.host.key, "trio": a.trio, "loop": getattr(a, "loop", None),
+                 "tandemkit": a.tandemkit, "sanitizer": a.sanitizer,
                  "minutes": round((time.time() - t) / 60, 1),
                  "faketandem": {"binary": str(self.fk.binary), "jar": str(self.fk.jar), "info": self.fk.info}}
         (self.run.path / "build.json").write_text(json.dumps(build, indent=2))
@@ -326,6 +349,10 @@ class Lane:
                                "(another stress run on this machine?); build again")
         for k in ("trio", "tandemkit", "sanitizer"):
             setattr(self.args, k, b[k])
+        for k in ("host", "loop"):          # absent from builds made before Loop was a host: Trio's
+            setattr(self.args, k, b.get(k) or (hosts.TRIO.key if k == "host" else None))
+        built = {k: getattr(self.args, k) for k in ("host", "trio", "loop", "tandemkit", "sanitizer")}
+        self.run.update_meta(host=self.host.key, args={**(self.run.meta.get("args") or {}), **built})
         fk = b["faketandem"]
         self.fk = Faketandem(Path(fk["binary"]), Path(fk["jar"]), fk["info"])
         return app, b["bundle_id"]
@@ -341,7 +368,6 @@ class Lane:
 
     def install_and_seed(self, app: Path, bundle_id: str) -> bytes:
         from .faketandem import DEFAULT_PAIRING_CODE
-        from harness.flows import trio as F
         from harness.sim import SimulatorDriver
         from . import seed
         # the driver itself, not the daemon proxy get_driver() hands out: the lane needs its udid and containers
@@ -351,13 +377,16 @@ class Lane:
             self.drv.uninstall(bundle_id)
         self.drv.install(app)
         self.container = self.drv.app_data_container(bundle_id)
-        F.preseed_onboarding(self.container)
-        seed.write_trio_settings(self.container, app=app)
+        if self.host is hosts.LOOP:
+            self.loop_prefs = seed.seed_loop(self.drv, self.container, bundle_id, fresh=not self.args.keep_installed)[0]
+        else:
+            self.host.flows.preseed_onboarding(self.container)
+            seed.write_trio_settings(self.container, app=app)
         key = os.urandom(32)
         hello = self.fk.stage_paired_pump(key, DEFAULT_PAIRING_CODE)
         seed.write_pump_state(self.container, seed.tandem_pump_manager_raw(
             peripheral_id=hello["peripheral_id"], long_term_key=key, pairing_code=DEFAULT_PAIRING_CODE))
-        self.run.log_step("seeded", f"onboarding, closed loop + Glucose Simulator, Tandem pump paired with faketandem "
+        self.run.log_step("seeded", f"onboarding, closed loop + {self.host.cgm}, Tandem pump paired with faketandem "
                                     f"({hello['peripheral_id'].upper()})")
         return key
 
@@ -382,10 +411,10 @@ class Lane:
         self.app.launch()
 
     def bring_up_ui(self):
-        """WebDriverAgent, the home screen, and the Glucose Simulator if the seeded setting did not take. The lane
-        runs without UI actions when any of it fails: the pump-side chaos does not need it."""
+        """WebDriverAgent, the home screen (past Loop's permission prompts), and the simulated CGM if the seeded one did
+        not take. The lane runs without UI actions when any of it fails: the pump-side chaos does not need it."""
         from harness import wda as W
-        from harness.flows import trio as F
+        F = self.host.flows
         if self.args.no_ui:
             return
         if W.is_running() and not wda_started_here():
@@ -399,10 +428,15 @@ class Lane:
             self.drv.ensure_wda()
             time.sleep(6)
             F.settle(self.drv, self.run)
+            if F.PROMPTS_AFTER_PRESEED and not F.at_home(self.drv) and F.walk_onboarding(self.drv, self.run):
+                self.seed_note = (f"{self.host.name} opened on its welcome screen: the seeded onboarding and settings did "
+                                  "not take, so this run used LoopOnboarding's mock settings (open loop) instead")
+                log(self.seed_note)
+                self.run.update_meta(seed_taken=False)
             if not F.at_home(self.drv):
                 F.step(self.run, self.drv, "not-home", "home screen not detected; UI actions disabled")
                 return
-            if self.drv.find("Add CGM", exact=True):
+            if F.offers(self.drv, F.ADD_CGM):
                 F.add_cgm_simulator(self.drv, self.run)
             F.step(self.run, self.drv, "home", "home screen, before the first round")
             self.ui = self.drv
@@ -432,8 +466,9 @@ class Lane:
         if self.app.died_unexpectedly():
             pid = self.app.pid
             time.sleep(3)          # ReportCrash needs a moment to write the .ips
-            self.add_finding(Finding(kind="app-died", title="Trio exited without the harness ending it",
-                                     signature=["app-died"], round=r,
+            self.add_finding(Finding(kind="app-died", title=f"{self.host.name} exited without the harness ending it",
+                                     signature=["app-died", *([self.host.name] if self.host is not hosts.TRIO else [])],
+                                     round=r,
                                      details=f"pid {pid} (launch {len(self.app.launches)}) exited; its crash report, "
                                              "if one was written, is filed as its own finding"))
             self.collect_crashes()
@@ -477,13 +512,12 @@ class Lane:
         return True
 
     def rounds_loop(self):
-        from harness.flows import trio as F
         from . import recovery
         from .chaos import INTENSITY_GAPS, Chaos, ChaosContext
         a = self.args
         cats = set(a.categories.split(",")) if a.categories else None
         ctx = ChaosContext(random.Random(self.seed), self.fk.client, self.fk.control, app=self.app, ui=self.ui,
-                           ui_flows=F)
+                           ui_flows=self.host.flows, host=self.host.key)
         self.chaos = Chaos(ctx, intensity="medium" if a.intensity == "cycle" else a.intensity, categories=cats,
                            log_path=self.run.path / "actions.jsonl")
         round_s = a.round_minutes * 60
@@ -539,7 +573,7 @@ class Lane:
 
     def collect_crashes(self) -> None:
         dest = self.run.path / "crashes"
-        for p in find_crash_reports(default_crash_dirs(), since=self.t0, proc="Trio"):
+        for p in find_crash_reports(default_crash_dirs(), since=self.t0, proc=self.host.name):
             if (dest / p.name).exists():
                 continue
             dest.mkdir(exist_ok=True)
@@ -572,14 +606,16 @@ class Lane:
         if not self.container:
             return
         dest = self.run.path / "logs"
-        for rel in ("Documents/tandem/tandem_log.txt", "Documents/tandem/tandem_log_prev.txt",
-                    "Documents/logs/log.txt", "Documents/logs/log_prev.txt"):
+        for rel in self.host.log_files:
             p = self.container / rel
             if p.exists():
                 dest.mkdir(exist_ok=True)
                 shutil.copy2(p, dest / p.name)
         from . import seed
-        self.run.update_meta(trio_settings_after=seed.read_back(self.container))
+        if self.host is hosts.LOOP:
+            self.run.update_meta(loop_settings_after=seed.loop_read_back(self.loop_prefs))
+        else:
+            self.run.update_meta(trio_settings_after=seed.read_back(self.container))
 
     # ---------------- report -----------------
 
@@ -594,8 +630,8 @@ class Lane:
         errors = sum(v for k, v in counts.items() if k.endswith(":error"))
         failures = [f for f in self.findings if f.kind in FAILURE_KINDS or f.kind == "build"]
         build = meta.get("build") or {}
-        lines = [f"## TandemKit stress (simulator + faketandem): {self.status}", "",
-                 f"Trio `{self.args.trio}` @ `{git.get('sha', '?')}` · TandemKit `{self.args.tandemkit}` @ "
+        lines = [f"## TandemKit stress ({self.host.name}, simulator + faketandem): {self.status}", "",
+                 f"{self.host.name} `{self.source}` @ `{git.get('sha', '?')}` · TandemKit `{self.args.tandemkit}` @ "
                  f"`{subs.get('TandemKit', '?')}` · faketandem `{fk.get('ref', fk.get('source', '?'))}` @ "
                  f"`{fk.get('sha', '?')}`",
                  " · ".join([f"sanitizer `{self.args.sanitizer}`"]
@@ -611,6 +647,8 @@ class Lane:
         lines.append("")
         if self.note:
             lines += [self.note, ""]
+        if self.seed_note:
+            lines += [f"⚠️ {self.seed_note}.", ""]
         if failures:
             from .issues import read_ledger
             filed = read_ledger(self.run.path)
@@ -636,10 +674,10 @@ class Lane:
             lines.append("")
         tk = subs.get("TandemKit") or self.args.tandemkit
         if self.stress:
-            lines.append(f"Reproduce: `./tandemkit-stress run --trio {self.args.trio} --tandemkit {tk} --seed {self.seed} "
+            lines.append(f"Reproduce: `./tandemkit-stress run {self.host_flags()} --tandemkit {tk} --seed {self.seed} "
                          f"--intensity {self.args.intensity}` (the seed fixes the plan of actions, not thread timing)")
         else:
-            lines.append(f"Rebuild: `./tandemkit-stress build --trio {self.args.trio} --tandemkit {tk}`")
+            lines.append(f"Rebuild: `./tandemkit-stress build {self.host_flags()} --tandemkit {tk}`")
         return "\n".join(lines) + "\n"
 
     # ---------------- driver -----------------
@@ -677,8 +715,10 @@ class Lane:
             meta = self.run.meta
             self.run.update_meta(seed=self.seed, status="running", args={**(meta.get("args") or {}), **own})
         else:
-            self.run = new_run("stress-" + re.sub(r"[^\w.-]+", "-", f"{a.tandemkit}"),
-                               {"kind": "stress", "title": f"TandemKit stress: Trio {a.trio} + TandemKit {a.tandemkit}",
+            prefix = "stress-" if self.host is hosts.TRIO else f"stress-{self.host.key}-"
+            self.run = new_run(prefix + re.sub(r"[^\w.-]+", "-", f"{a.tandemkit}"),
+                               {"kind": "stress", "host": self.host.key,
+                                "title": f"TandemKit stress: {self.host.name} {self.source} + TandemKit {a.tandemkit}",
                                 "args": own, **({"seed": self.seed} if self.stress else {})})
         self.findings = Findings(self.run.path / "findings.json")
         if self.issues_repo:
@@ -766,10 +806,16 @@ def cmd_build(args) -> int:
 
 
 def add_build_arguments(p) -> None:
+    from . import setting
     g = p.add_argument_group("build (with `run --build`, taken from that build instead)")
+    g.add_argument("--host", choices=sorted(hosts.HOSTS), default=setting("TKSTRESS_HOST") or hosts.TRIO.key,
+                   help="the app TandemKit runs in: trio, or loop (Loop built from LoopWorkspace); default "
+                        "TKSTRESS_HOST, else trio")
     g.add_argument("--trio", default=DEFAULT_TRIO, help=f"Trio branch spec (default {DEFAULT_TRIO})")
+    g.add_argument("--loop", default=DEFAULT_LOOP, help=f"LoopWorkspace branch spec, with --host loop (default {DEFAULT_LOOP})")
     g.add_argument("--tandemkit", default=DEFAULT_TANDEMKIT,
-                   help="TandemKit ref for Trio's submodule: a branch or sha, owner/repo@branch, or a PR (default dev)")
+                   help="TandemKit ref for the host app's submodule: a branch or sha, owner/repo@branch, or a PR "
+                        "(default dev)")
     g.add_argument("--faketandem-ref", default=None, help="faketandem branch/tag/sha (default FAKETANDEM_REF, main)")
     g.add_argument("--sanitizer", choices=["thread", "address", "none"], default="thread")
     g.add_argument("--build-minutes", type=float,
@@ -795,7 +841,8 @@ def add_run_arguments(p) -> None:
                         "its runner's job limit less the time collection and uploads need")
     g.add_argument("--build", metavar="RUN_DIR", help="stress the build `tandemkit-stress build` made in RUN_DIR, "
                                                        "and add this run's results to that directory")
-    g.add_argument("--app", help="a Trio.app already built with TANDEMKIT_VIRTUAL_PUMP: skip checkout and build")
+    g.add_argument("--app", help="a Trio.app (Loop.app with --host loop) already built with TANDEMKIT_VIRTUAL_PUMP: skip "
+                                 "checkout and build")
     g.add_argument("--round-minutes", type=float, default=4, help="chaos per round before each recovery check")
     g.add_argument("--seed", type=int, help="seed for the chaos plan (default: random, printed and recorded)")
     g.add_argument("--intensity", choices=["cycle", "low", "medium", "high"], default="cycle",

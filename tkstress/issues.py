@@ -23,7 +23,7 @@ the token `gh` files with (CI: the workflow's GITHUB_TOKEN, while GH_TOKEN holds
 
 Nothing is filed in TandemKit: a person (or Claude, on request) promotes a confirmed driver bug there.
 Bodies are scrubbed of long hex/base64 strings, UUIDs and home-directory paths before they leave the machine; the runs
-use only faketandem and the Glucose Simulator, but the long-term key the lane generates must never be posted.
+use only faketandem and the app's simulated CGM, but the long-term key the lane generates must never be posted.
 """
 from __future__ import annotations
 
@@ -146,13 +146,25 @@ def run_line(run_dir: Path) -> str:
     return f"Run: {link}" if link else f"Run: started by hand; `runs/{run_dir.name}` on the Mac that ran it (not uploaded)"
 
 
+def _host(args: dict):
+    from .hosts import get
+    return get(args.get("host"))
+
+
+def host_flags(args: dict) -> str:
+    """The flags that build a run's host app again (runs from before Loop was a host built Trio)."""
+    host = _host(args)
+    return f"--trio {args.get('trio')}" if host.key == "trio" else f"--host {host.key} --{host.key} {args.get(host.key)}"
+
+
 def environment_lines(meta: dict) -> list[str]:
     args = meta.get("args") or {}
     git = meta.get("git") or {}
     subs = git.get("submodules") or {}
     fk = meta.get("faketandem") or {}
     build = meta.get("build") or {}
-    return [f"- Trio: `{args.get('trio')}` @ `{git.get('sha', '?')}`",
+    host = _host(args)
+    return [f"- {host.name}: `{args.get(host.key)}` @ `{git.get('sha', '?')}`",
             f"- TandemKit: `{args.get('tandemkit')}` @ `{subs.get('TandemKit', '?')}`",
             f"- faketandem: `{fk.get('ref', '?')}` @ `{fk.get('sha', '?')}`",
             f"- seed `{meta.get('seed')}`, sanitizer `{args.get('sanitizer')}`, intensity `{args.get('intensity')}`"
@@ -225,12 +237,12 @@ def issue_body(f: dict, meta: dict, run_dir: Path, attachments: tuple[list[str],
         lines += ["### Environment", "", *environment_lines(meta), ""]
         lines += _attachment_lines(f, attachments)
         lines += ["### Reproduce", "", "```",
-                  f"./tandemkit-stress run --trio {args.get('trio')} --tandemkit "
+                  f"./tandemkit-stress run {host_flags(args)} --tandemkit "
                   f"{subs.get('TandemKit') or args.get('tandemkit')} --seed {meta.get('seed')} --intensity "
                   f"{args.get('intensity')}", "```",
                   "The seed fixes the plan of actions, not thread timing: a race may take several runs to reappear.",
                   "", run_line(run_dir), "",
-                  "Simulated devices only (faketandem, Glucose Simulator); no real pump or health data.", "",
+                  f"Simulated devices only (faketandem, {_host(args).cgm}); no real pump or health data.", "",
                   "---", "_Filed by tandemkit-stress_"]
         return scrub("\n".join(lines))
     return _fit(render)

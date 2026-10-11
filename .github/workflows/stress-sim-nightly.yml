@@ -1,7 +1,8 @@
-# The simulator stress job (stress-sim-job.yml) twice a night, at 02:00 and 06:00 New York time: a build of
-# closed-beta Trio with TandemKit dev and ThreadSanitizer, then stress at cycling intensity until 20 minutes before the
-# runner's 4-hour limit, issues filed for findings. A job that starts late (the runner was busy) is cut by the same
-# limit; the second waits for the first in the concurrency group.
+# The simulator stress job (stress-sim-job.yml) twice a night, at 02:00 New York time in Trio and at 06:00 in Loop: a
+# build of the closed-beta app (nightscout/Trio, LoopKit/LoopWorkspace feat/tandem-closed-beta) with TandemKit dev and
+# ThreadSanitizer, then stress at cycling intensity until 20 minutes before the runner's 4-hour limit, issues filed for
+# findings. A job that starts late (the runner was busy) is cut by the same limit; the second waits for the first in
+# the concurrency group.
 name: Stress nightly
 
 on:
@@ -27,6 +28,7 @@ jobs:
     with:
       minutes: 240
       build_minutes: 120
+      host: ${{ github.event.schedule == '0 6 * * *' && 'loop' || 'trio' }}
     secrets:
       TRIO_E2E_APP_ID: ${{ secrets.TRIO_E2E_APP_ID }}
       TRIO_E2E_APP_KEY: ${{ secrets.TRIO_E2E_APP_KEY }}

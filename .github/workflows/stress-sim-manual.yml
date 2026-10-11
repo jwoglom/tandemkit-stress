@@ -2,8 +2,9 @@
 # default) on a TandemKit branch or PR, with a seed to reproduce, another intensity or chaos mix.
 #   gh workflow run stress-sim-manual.yml -R jwoglom/tandemkit-stress -f tandemkit=jwoglom/TandemKit#470 -f seed=42
 #   gh workflow run stress-sim-manual.yml -R jwoglom/tandemkit-stress -f minutes=240
+#   gh workflow run stress-sim-manual.yml -R jwoglom/tandemkit-stress -f host=loop
 name: Stress manual
-run-name: "stress: TandemKit ${{ inputs.tandemkit }}, ${{ inputs.minutes }} min${{ inputs.seed && format(', seed {0}', inputs.seed) || '' }}"
+run-name: "stress${{ inputs.host == 'loop' && ' (Loop)' || '' }}: TandemKit ${{ inputs.tandemkit }}, ${{ inputs.minutes }} min${{ inputs.seed && format(', seed {0}', inputs.seed) || '' }}"
 
 on:
   workflow_dispatch:
@@ -12,10 +13,19 @@ on:
         description: "TandemKit ref for the submodule: branch, sha, owner/repo@branch or a PR"
         type: string
         default: dev
+      host:
+        description: "The app TandemKit runs in"
+        type: choice
+        options: [trio, loop]
+        default: trio
       trio:
-        description: "Trio branch spec"
+        description: "Trio branch spec (host trio)"
         type: string
         default: "nightscout/Trio:feat/tandem-closed-beta"
+      loop:
+        description: "LoopWorkspace branch spec (host loop)"
+        type: string
+        default: "LoopKit/LoopWorkspace:feat/tandem-closed-beta"
       minutes:
         description: "Minutes of stress, after the build and simulator setup (the runners stop a job at 4 hours, so at most about 3 hours)"
         type: number
@@ -74,7 +84,9 @@ jobs:
       minutes: ${{ fromJSON(inputs.minutes) }}
       build_minutes: ${{ fromJSON(inputs.build_minutes) }}
       tandemkit: ${{ inputs.tandemkit }}
+      host: ${{ inputs.host }}
       trio: ${{ inputs.trio }}
+      loop: ${{ inputs.loop }}
       seed: ${{ inputs.seed }}
       intensity: ${{ inputs.intensity }}
       sanitizer: ${{ inputs.sanitizer }}

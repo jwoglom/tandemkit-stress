@@ -1,7 +1,8 @@
-# The simulator stress job: Trio (nightscout/Trio feat/tandem-closed-beta) with its TandemKit submodule moved to
-# TandemKit dev, built with the virtual pump and ThreadSanitizer, on the iOS Simulator against faketandem, while
-# `tandemkit-stress run` injects pump-side events, link faults and app kills (docs/lane.md). Findings become issues in
-# this repository: one per fingerprint, a repeat comments on the open issue.
+# The simulator stress job: Trio (nightscout/Trio feat/tandem-closed-beta), or with host loop Loop (LoopKit/LoopWorkspace
+# feat/tandem-closed-beta), with its TandemKit submodule moved to TandemKit dev, built with the virtual pump and
+# ThreadSanitizer, on the iOS Simulator against faketandem, while `tandemkit-stress run` injects pump-side events, link
+# faults and app kills (docs/lane.md). Findings become issues in this repository: one per fingerprint, a repeat
+# comments on the open issue.
 # The build is its own step, with its own limit, and `minutes` is the stress alone. The self-hosted runners stop a
 # job 4 hours after it starts, losing everything not yet uploaded, so the job finishes inside runner_limit_minutes.
 # It has no trigger of its own: stress-sim-nightly.yml (02:00 and 06:00 New York time) and stress-sim-manual.yml
@@ -23,9 +24,16 @@ on:
         description: "When the runner stops the job; the stress ends 20 minutes before, for collection, issues and uploads"
         type: number
         default: 240
+      host:
+        description: "The app TandemKit runs in: trio or loop"
+        type: string
+        default: trio
       trio:
         type: string
         default: "nightscout/Trio:feat/tandem-closed-beta"
+      loop:
+        type: string
+        default: "LoopKit/LoopWorkspace:feat/tandem-closed-beta"
       tandemkit:
         type: string
         default: dev
@@ -70,7 +78,9 @@ jobs:
     timeout-minutes: ${{ inputs.runner_limit_minutes }}
     env:
       # Inputs reach scripts only through env, never interpolated into them.
+      IN_HOST: ${{ inputs.host || 'trio' }}
       IN_TRIO: ${{ inputs.trio || 'nightscout/Trio:feat/tandem-closed-beta' }}
+      IN_LOOP: ${{ inputs.loop || 'LoopKit/LoopWorkspace:feat/tandem-closed-beta' }}
       IN_TANDEMKIT: ${{ inputs.tandemkit || 'dev' }}
       IN_FAKETANDEM_REF: ${{ inputs.faketandem_ref }}
       IN_SEED: ${{ inputs.seed }}
@@ -82,6 +92,9 @@ jobs:
       TH_SIM_DEVICE: iPhone 17
       TH_TRIO_ORIGIN: nightscout/Trio
       TH_TRIO_REFERENCE: /Volumes/work/mirrors/nightscout/Trio.git
+      TH_LOOP_ORIGIN: LoopKit/LoopWorkspace
+      # used only if a worker has this mirror
+      TH_LOOP_REFERENCE: /Volumes/work/mirrors/LoopKit/LoopWorkspace.git
       TH_GIT_MIRRORS: /Volumes/work/mirrors
       TH_WDA_PREBUILT: /Volumes/work/cache/wda/current
     steps:
@@ -98,7 +111,7 @@ jobs:
           HARNESS_REF: ${{ inputs.harness_ref }}
         run: echo "ref=${HARNESS_REF:-$(git ls-tree HEAD trio-test-harness | awk '{print $3}')}" >> "$GITHUB_OUTPUT"
 
-      # Contents: read on jwoglom/trio-test-harness (the submodule) and jwoglom/TandemKit (Trio's submodule). An App
+      # Contents: read on jwoglom/trio-test-harness (the submodule) and jwoglom/TandemKit (the app's submodule). An App
       # token lasts an hour: the build step fetches everything it needs from GitHub in its first minutes, and the
       # stress step needs nothing from GitHub.
       - name: GitHub App token (jwoglom)
@@ -145,7 +158,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Build Trio and faketandem
+      - name: Build the app and faketandem
         id: build
         env:
           TH_GIT_TOKEN: ${{ steps.token.outputs.token }}
@@ -158,8 +171,8 @@ jobs:
           fits=$(( (JOB_WALL - $(date +%s)) / 60 - 20 - 30 ))
           build=$(( ${IN_BUILD_MINUTES%.*} < fits ? ${IN_BUILD_MINUTES%.*} : fits ))
           (( build >= 1 )) || build=1
-          args=(--trio "$IN_TRIO" --tandemkit "$IN_TANDEMKIT" --sanitizer "$IN_SANITIZER"
-                --build-minutes "$build" --result-json "$RUNNER_TEMP/build-result.json")
+          args=(--host "$IN_HOST" --trio "$IN_TRIO" --loop "$IN_LOOP" --tandemkit "$IN_TANDEMKIT"
+                --sanitizer "$IN_SANITIZER" --build-minutes "$build" --result-json "$RUNNER_TEMP/build-result.json")
           [ -z "$IN_FAKETANDEM_REF" ] || args+=(--faketandem-ref "$IN_FAKETANDEM_REF")
           if [ "$IN_FILE_ISSUES" = true ]; then
             if command -v gh >/dev/null; then args+=(--file-issues)
@@ -229,7 +242,7 @@ jobs:
           case "$BUILD" in
             built) ;;
             build-incomplete) echo "::error title=Not tested: build incomplete::the build did not finish within its limit (build_minutes $BUILD_MINUTES, less if the runner's time limit came first), so nothing was stress-tested. The next run continues it from DerivedData."; exit 1 ;;
-            build-failed) echo "::error title=Build break::Trio does not build against this TandemKit"; exit 1 ;;
+            build-failed) echo "::error title=Build break::$IN_HOST does not build against this TandemKit"; exit 1 ;;
             busy) echo "::error title=Not tested: lane busy::another stress run on this runner's Mac held the lane; see the job summary"; exit 1 ;;
             *) echo "::error title=Harness error::the build step did not complete; see its log"; exit 1 ;;
           esac
