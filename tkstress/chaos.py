@@ -1,4 +1,5 @@
-"""The chaos the stress lane throws at TandemKit while Trio runs: pump-side events, link faults, app lifecycle, UI.
+"""The chaos the stress lane throws at TandemKit while its host app (Trio or Loop) runs: pump-side events, link faults,
+app lifecycle, UI.
 
 A seeded `random.Random` picks every action and its parameters, so a seed reproduces the plan. It does not
 reproduce the interleaving: whether an action applies depends on live state (a bolus already running, no session
@@ -62,10 +63,12 @@ class _Pending:
 
 class ChaosContext:
     """What actions act on. `app` (app.SimApp) and `ui` (a Driver with WebDriverAgent) are optional:
-    without them the app and UI actions are not offered."""
+    without them the app and UI actions are not offered. `host` (tkstress/hosts.py) picks the UI actions, and
+    `ui_flows` is that app's harness flows module."""
 
-    def __init__(self, rng: random.Random, pump, control, app=None, ui=None, ui_flows=None):
+    def __init__(self, rng: random.Random, pump, control, app=None, ui=None, ui_flows=None, host: str = "trio"):
         self.rng, self.pump, self.control, self.app, self.ui, self.ui_flows = rng, pump, control, app, ui, ui_flows
+        self.host = host
         self._pending: list[_Pending] = []
         self._seq = itertools.count()
 
@@ -103,6 +106,7 @@ class Action:
     category: str
     weight: float
     fn: Callable[[ChaosContext], dict]
+    hosts: tuple[str, ...] | None = None        # the host apps it applies to; None: any
 
 
 # ---------------- pump side -----------------
@@ -332,6 +336,36 @@ def ui_tab_hop(ctx: ChaosContext) -> dict:
     return {"tab": tab}
 
 
+def ui_loop_pump_settings(ctx: ChaosContext) -> dict:
+    """Loop's Settings ▸ the pump ("Tandem mobi", TandemPumpManager.localizedTitle): TandemKit's own settings screen,
+    which reads pump state while it is open."""
+    F = ctx.ui_flows
+    try:
+        F.open_settings(ctx.ui)
+        ctx.ui.tap_text("Tandem")
+        time.sleep(ctx.rng.uniform(1, 5))
+    except LookupError as e:
+        raise Skip(f"navigation: {e}") from None
+    finally:
+        F.reset_to_home(ctx.ui)
+    return {}
+
+
+def ui_chart_hop(ctx: ChaosContext) -> dict:
+    """One of Loop's status charts, opened and closed: Active Insulin and Insulin Delivery list the doses DoseStore holds
+    from the driver, Glucose the prediction."""
+    chart = ctx.rng.choice(["Active Insulin", "Insulin Delivery", "Glucose"])
+    try:
+        ctx.ui_flows.settle(ctx.ui, rounds=2)
+        ctx.ui.tap_text(chart, exact=True, ocr_fallback=False)
+        time.sleep(ctx.rng.uniform(1, 4))
+    except LookupError as e:
+        raise Skip(f"no {chart} chart: {e}") from None
+    finally:
+        ctx.ui_flows.reset_to_home(ctx.ui)
+    return {"chart": chart}
+
+
 ACTIONS = [
     Action("pump_bolus", "pump", 3, pump_bolus),
     Action("pump_bolus_abort", "pump", 1, pump_bolus_abort),
@@ -354,8 +388,10 @@ ACTIONS = [
     Action("app_kill", "app", 1, app_kill),
     Action("app_terminate", "app", 0.3, app_terminate),
     Action("app_background", "app", 1, app_background),
-    Action("ui_pump_settings", "ui", 0.8, ui_pump_settings),
-    Action("ui_tab_hop", "ui", 0.8, ui_tab_hop),
+    Action("ui_pump_settings", "ui", 0.8, ui_pump_settings, hosts=("trio",)),
+    Action("ui_tab_hop", "ui", 0.8, ui_tab_hop, hosts=("trio",)),
+    Action("ui_loop_pump_settings", "ui", 0.8, ui_loop_pump_settings, hosts=("loop",)),
+    Action("ui_chart_hop", "ui", 0.8, ui_chart_hop, hosts=("loop",)),
 ]
 
 
@@ -371,6 +407,7 @@ class Chaos:
             wanted.discard("ui")
         # backgrounding goes through the UI driver's home button
         self.actions = [a for a in (actions or ACTIONS) if a.category in wanted
+                        and (a.hosts is None or ctx.host in a.hosts)
                         and not (a.name == "app_background" and ctx.ui is None)]
         if not self.actions:
             raise HarnessError(f"no chaos actions left for categories {sorted(wanted)}")

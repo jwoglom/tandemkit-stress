@@ -61,7 +61,8 @@ def cmd_doctor(args) -> int:
     print("tandemkit-stress")
     item("trio-test-harness", True, str(HARNESS_DIR))
     item("build cache", True, str(CACHE_DIR))
-    for key in ("TRIO_REPO", "TH_DERIVED_DATA", "TH_BUILD_DIR", "TH_RUNS_DIR", "TH_SIM_NAME"):
+    for key in ("TRIO_REPO", "TH_DERIVED_DATA", "LOOP_REPO", "TH_LOOP_DERIVED_DATA", "TH_BUILD_DIR", "TH_RUNS_DIR",
+                "TH_SIM_NAME"):
         item(key, True, os.environ.get(key, ""))
     from .lock import LaneBusy, hold
     try:
@@ -104,11 +105,11 @@ def cmd_doctor(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     from .lane import add_build_arguments, add_run_arguments
     p = argparse.ArgumentParser(prog="tandemkit-stress",
-                                description="TandemKit stress lane: Trio on the simulator against faketandem")
+                                description="TandemKit stress lane: Trio or Loop on the simulator against faketandem")
     sp = p.add_subparsers(dest="cmd", required=True)
     add_run_arguments(sp.add_parser("run", help="build (or --build RUN_DIR), then --minutes of chaos rounds and recovery checks"))
-    add_build_arguments(sp.add_parser("build", help="checkout + build Trio and faketandem into a new run directory, "
-                                                     "for `run --build`"))
+    add_build_arguments(sp.add_parser("build", help="checkout + build the host app (Trio, or Loop with --host loop) and "
+                                                     "faketandem into a new run directory, for `run --build`"))
     fi = sp.add_parser("file-issues", help="one GitHub issue per distinct finding of a run (deduplicated)")
     fi.add_argument("run_dir")
     fi.add_argument("--repo", help="owner/repo (default TKSTRESS_ISSUES_REPO, GITHUB_REPOSITORY in CI, else this "

@@ -1,6 +1,6 @@
 ---
 name: tandemkit-stress
-description: Run, read and triage the TandemKit stress lane (`./tandemkit-stress run`). It runs Trio on the iOS Simulator with TandemKit built against faketandem (the Tandem pump emulator) under ThreadSanitizer, with seeded chaos (pump-side events, link faults, app kills) and recovery checks. Use when asked to stress test or fuzz TandemKit, look for races or crashes in the Tandem driver, run or re-run the nightly stress job, reproduce a stress finding from its seed, or triage a `stress` issue in jwoglom/tandemkit-stress.
+description: Run, read and triage the TandemKit stress lane (`./tandemkit-stress run`). It runs Trio (or Loop, `--host loop`) on the iOS Simulator with TandemKit built against faketandem (the Tandem pump emulator) under ThreadSanitizer, with seeded chaos (pump-side events, link faults, app kills) and recovery checks. Use when asked to stress test or fuzz TandemKit, look for races or crashes in the Tandem driver, run or re-run the nightly stress job, reproduce a stress finding from its seed, or triage a `stress` issue in jwoglom/tandemkit-stress.
 ---
 
 # tandemkit-stress
@@ -11,13 +11,14 @@ Run commands from the tandemkit-stress checkout (`./setup.sh` once). Full descri
 | Want | Command |
 |---|---|
 | The nightly configuration (closed-beta Trio + TandemKit dev, TSan, intensity cycling) | `./tandemkit-stress run --minutes 200` (build first, then `--minutes` of stress; default 60) |
+| TandemKit inside Loop (LoopKit/LoopWorkspace `feat/tandem-closed-beta`; the 06:00 nightly) | add `--host loop` (`--loop <branch spec>` for another LoopWorkspace branch) |
 | Only build, or stress a build made earlier | `./tandemkit-stress build [--build-minutes 120]` · `./tandemkit-stress run --build runs/<run>` |
 | On a Mac without Actions, filing issues with the local `gh` login | add `--file-issues` (checks `gh` first; repo: this checkout's origin) |
 | Shorter / reproducible / harsher | `./tandemkit-stress run --minutes 25 --seed 42 --intensity high` |
 | A TandemKit branch or PR | `--tandemkit my-branch` · `--tandemkit jwoglom/TandemKit#470` |
-| Skip checkout + build (an app already built with the virtual pump) | `--app <path to Trio.app>` |
+| Skip checkout + build (an app already built with the virtual pump) | `--app <path to Trio.app>` (`Loop.app` with `--host loop`) |
 | Only some chaos | `--categories pump,link` (also `app`, `ui`); `--no-ui` skips WebDriverAgent |
-| In CI | `gh workflow run stress-sim-manual.yml -R jwoglom/tandemkit-stress -f tandemkit=… -f seed=… [-f minutes=240] [-f build_minutes=180]` |
+| In CI | `gh workflow run stress-sim-manual.yml -R jwoglom/tandemkit-stress -f tandemkit=… -f seed=… [-f host=loop] [-f minutes=240] [-f build_minutes=180]` |
 
 One stress run per machine: a lock in the build cache covers runs started by hand and CI jobs alike. A run that
 finds it held exits with 4 and names the holder; `--wait` queues instead. The lane uses its own simulator
@@ -37,7 +38,7 @@ plus `FAKETANDEM_JAR`. `./tandemkit-stress doctor` checks all of this.
   - `logs/tandem_log.txt`.
   - `faketandem.log`.
   - `faketandem-requests.jsonl`: every message the pump saw, with sequence numbers.
-- Exit code and `result.json` status: 0 clean or built, 1 findings, 2 harness failure or interrupted, 3 Trio does
+- Exit code and `result.json` status: 0 clean or built, 1 findings, 2 harness failure or interrupted, 3 the host app does
   not build, 4 lane busy, 5 nothing tested (build stopped at `--build-minutes`, or `--until` left no time).
 
 ## Triage a finding

@@ -1,5 +1,5 @@
-"""Put a freshly installed Trio into the state the stress lane starts from, with no UI: a Tandem pump already paired
-with faketandem, closed loop on, the Glucose Simulator as CGM.
+"""Put a freshly installed Trio or Loop into the state the stress lane starts from, with no UI: a Tandem pump already
+paired with faketandem, closed loop on, the app's simulated CGM.
 
 Facts about Trio (nightscout/Trio feat/tandem-closed-beta) this relies on:
   * The pump manager is restored from Documents/PumpManagerState.plist, a plist of
@@ -15,6 +15,12 @@ Facts about TandemKit (TandemPumpManagerState / PumpState rawValue):
   * It reconnects by scanning for `peripheralUuid` and comparing it as a string with
     `CBPeripheral.identifier.uuidString`, which Foundation spells in upper case.
   * `enactTempBasal` refuses everything but a cancel until `hasSyncedBasalRateSchedule` (#443).
+
+Facts about Loop (LoopKit/LoopWorkspace feat/tandem-closed-beta):
+  * It restores its pump and CGM managers from Documents/PumpManagerState.plist and CGMManagerState.plist, the same
+    PersistedProperty plists as Trio's pump manager.
+  * Onboarding and the therapy settings live in its app group's preferences, which trio-test-harness's Loop flows
+    write (harness/flows/loop.py), after emptying the app group the simulator keeps across reinstalls.
 """
 from __future__ import annotations
 
@@ -73,6 +79,37 @@ def tandem_pump_manager_raw(*, peripheral_id: str, long_term_key: bytes, pairing
             "settings": {"maxBolus": float(max_bolus), "maxTempBasalRate": float(max_basal)},
         },
     }
+
+
+# A CGM Simulator swinging between 80 and 200 mg/dL every 2 hours, a reading a minute, and automatic boluses: Loop
+# commands temp basals both ways and boluses, as Trio's SMBs do.
+LOOP_GLUCOSE = {"base": 140.0, "amplitude": 60.0, "period_hours": 2.0, "frequency": 1}
+LOOP_AUTOMATIC_BOLUS = 1
+
+
+def seed_loop(drv, container: Path, bundle_id: str, *, fresh: bool = True) -> list[Path]:
+    """Loop onboarded, closed loop with automatic boluses, on the lane's basal rate and limits, with a CGM Simulator that
+    reads (simulator only). `fresh` first empties the app group a reinstall leaves behind."""
+    from .hosts import LOOP
+    F = LOOP.flows
+    if fresh:
+        F.reset_after_install(drv, bundle_id)
+    written = F.preseed_simulator(drv, bundle_id, settings=F.therapy_settings(
+        dosing_enabled=True, dosing_strategy=LOOP_AUTOMATIC_BOLUS, basal_rate=BASAL_RATE, max_basal=MAX_BASAL,
+        max_bolus=MAX_BOLUS))
+    return [*written, F.write_cgm_simulator(container, F.sine_curve_source(**LOOP_GLUCOSE))]
+
+
+def loop_read_back(prefs: Path | None) -> dict:
+    """What Loop made of its seeded preferences: SettingsManager removes the legacy keys once it has migrated them."""
+    try:
+        values = plistlib.loads(prefs.read_bytes()) if prefs else None
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        values = None
+    if values is None:
+        return {"preferences": None}
+    return {"onboardingComplete": values.get("com.loopkit.Loop.OnboardingManager.IsComplete"),
+            "legacySettingsMigrated": "com.loopkit.Loop.loopSettings" not in values}
 
 
 def write_pump_state(container: Path, raw: dict) -> Path:

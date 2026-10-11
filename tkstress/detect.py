@@ -52,8 +52,11 @@ class Frame:
         return self.symbol if not self.module else f"{self.module}`{self.symbol}"
 
 
+LOOP_MODULES = {"Loop", "LoopCore", "LoopUI"}
+
+
 def component_of(frames: list[Frame]) -> str:
-    """Which code a report implicates first: the driver, the host app, LoopKit, or something else."""
+    """Which code a report implicates first: the driver, the host app (Trio or Loop), LoopKit, or something else."""
     for f in frames:
         if not f.interesting:
             continue
@@ -64,6 +67,8 @@ def component_of(frames: list[Frame]) -> str:
             return "LoopKit"
         if f.module == "Trio" or "/Trio/Sources/" in f.location:
             return "Trio"
+        if f.module in LOOP_MODULES or re.search(r"/Loop/(Loop|LoopCore|LoopUI)/", f.location):
+            return "Loop"
     return "other"
 
 

@@ -35,16 +35,11 @@ fixed-seed run.
 
 ## Loop on the simulator
 
-The same lane with LoopKit/LoopWorkspace `feat/tandem-closed-beta`, TandemKit moved to `dev`. It covers what Trio
-does not:
-- **Upstream LoopKit,** not Trio's loopandlearn fork.
-- **The `TandemKitPlugin.loopplugin` build.**
-- **Loop's dosing loop,** which runs on its simulator CGM.
-
-To be worked out:
-- How Loop persists pump manager state, so a paired TandemPumpManager can be seeded.
-- Building through `VirtualPump.xcconfig` across the whole workspace.
-- UI flows; trio-test-harness's are Trio's.
+Built: `--host loop` ([lane.md](lane.md#loop---host-loop)), nightly at 06:00, not yet run on a worker. It covers what
+Trio does not: upstream LoopKit rather than Trio's loopandlearn fork, the `TandemKitPlugin.loopplugin` build, and
+Loop's dosing loop on its CGM Simulator. Loop restores a paired TandemPumpManager from the same
+`Documents/PumpManagerState.plist` as Trio; its onboarding and settings are seeded through its app group's
+preferences, and trio-test-harness has Loop's build and UI flows (`--app loop`).
 
 ## The real Mobi (the phone Mac, daytime)
 
