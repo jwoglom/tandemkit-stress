@@ -384,6 +384,7 @@ class Lane:
             seed.write_trio_settings(self.container, app=app)
         key = os.urandom(32)
         hello = self.fk.stage_paired_pump(key, DEFAULT_PAIRING_CODE)
+        self.fk.client.set_state(basal_cycle_enabled=True)
         seed.write_pump_state(self.container, seed.tandem_pump_manager_raw(
             peripheral_id=hello["peripheral_id"], long_term_key=key, pairing_code=DEFAULT_PAIRING_CODE))
         self.run.log_step("seeded", f"onboarding, closed loop + {self.host.cgm}, Tandem pump paired with faketandem "

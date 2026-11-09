@@ -35,9 +35,8 @@ CONTROL_REQUESTS = [
     "CancelBolusRequest", "SuspendPumpingRequest", "ResumePumpingRequest", "SetMaxBolusLimitRequest",
     "SetMaxBasalLimitRequest",
 ]
-# error_response is applied after faketandem's handler ran (TandemKit docs/integration-harness.md, the open D3 gap), so
-# on InitiateBolus it would describe a pump that refused a bolus it is delivering: left out.
-ERRORABLE_REQUESTS = READ_REQUESTS + ["SetTempRateRequest", "StopTempRateRequest", "BolusPermissionRequest"]
+ERRORABLE_REQUESTS = READ_REQUESTS + ["SetTempRateRequest", "StopTempRateRequest", "BolusPermissionRequest",
+                                      "InitiateBolusRequest"]
 
 # Qualifying-event bits (TandemCore QualifyingEvent.id) whose suggested handlers only read status.
 QE = {"alert": 1, "homeScreenChange": 32, "basalChange": 512, "bolusChange": 1024, "iobChange": 2048,
