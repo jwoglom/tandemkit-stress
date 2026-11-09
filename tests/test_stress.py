@@ -1009,8 +1009,9 @@ class LiveFaketandem(unittest.TestCase):
             ok, st = recovery.wait_for_session(pump.client, timeout=1, poll=0.2)
             self.assertFalse(ok)                       # nothing connected to it
             self.assertFalse(st["connected"])
-            self.assertEqual(st.get("subscribed"), [])
-            with self.assertRaisesRegex(HarnessError, "409.*no central attached"):
+            # an older faketandem reports no subscriptions and says "no notifier registered"
+            self.assertIn(st.get("subscribed"), (None, []))
+            with self.assertRaisesRegex(HarnessError, "409.*(no central attached|no notifier registered)"):
                 pump.client.qualifying_event(262144)
             pump.client.set_state(basal_cycle_enabled=True)
             self.assertTrue(pump.client.snapshot()["basal_cycle"]["enabled"])
