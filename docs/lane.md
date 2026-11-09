@@ -63,7 +63,7 @@ The driver, faketandem, the pump and link chaos and the recovery check are the s
 | faketandem source | Build stage. Fetched from `FAKETANDEM_REPO`@`--faketandem-ref` and built (or `FAKETANDEM_BIN` + `FAKETANDEM_JAR`), before anything long: a CI job's GitHub App token expires after an hour. | `tkstress/faketandem.py` |
 | checkout + build | `prepare_source(branch=--trio, submodules=[TandemKit@--tandemkit])`, then `xcodebuild` with `TANDEMKIT_VIRTUAL_PUMP` and `ENABLE_THREAD_SANITIZER[sdk=iphonesimulator*] = YES` in the harness xcconfig. The sanitizer is set per SDK because Trio's scheme embeds a watchOS app, which the sanitizers do not support. A stress build never touches `build/last-build.json`. Its own xcconfig is `build/override-sim-tandemkit_virtual_pump-sanitized.xcconfig`. `--build-minutes` stops it (exit 5, status `build-incomplete`; the next build continues from DerivedData), so a CI job's limit never kills it without a report. `build.json` in the run directory records the app (with its executable's size and mtime), the faketandem binary and what was built; `run --build` refuses an app that changed since. | trio-test-harness `harness/build.py` |
 | faketandem | Started on two free loopback ports. Set to `PairStep2` with a random 32-byte long-term key over its websocket. | `tkstress/faketandem.py` |
-| simulator | Its own simulator, `TandemKitStress` (`TH_SIM_NAME`), so it never reinstalls the app a trio-test-harness job is using. Fresh install, onboarding pre-seeded, and three files written into the container. `Documents/PumpManagerState.plist` holds a TandemPumpManager already paired with that key. `freeaps/freeaps_settings.json` sets closed loop and the Glucose Simulator. `preferences.json` and `settings/` set max IOB 3, SMB always, and a basal of 0.85 U/hr to match faketandem. Settings overlay the defaults bundled in the built app. | `tkstress/seed.py` |
+| simulator | Its own simulator, `TandemKitStress` (`TH_SIM_NAME`), so it never reinstalls the app a trio-test-harness job is using. Fresh install, onboarding pre-seeded, and three files written into the container. `Documents/PumpManagerState.plist` holds a TandemPumpManager already paired with that key. `freeaps/freeaps_settings.json` sets closed loop and the Glucose Simulator. `preferences.json` and `settings/` set max IOB 3, SMB always, and a basal of 0.85 U/hr to match faketandem. faketandem's 5-minute basal cycle (`basal_cycle_enabled`) is turned on after the pump is staged, so it writes a BasalDelivery record every cycle and TandemKit's basal reconciliation runs under the chaos. Settings overlay the defaults bundled in the built app. | `tkstress/seed.py` |
 | launch | `simctl launch --stdout/--stderr=<run>/app/launch-NN.*` with `SIMCTL_CHILD_TANDEMKIT_VIRTUAL_PUMP=<faketandem>` and `TSAN_OPTIONS`, plus the toolchain's clang runtime directory as `DYLD_FALLBACK_LIBRARY_PATH` in case the sanitizer runtime was not embedded. TandemKit's OSLog is streamed to `tandemkit-oslog.txt`. WebDriverAgent comes up if it can, and the Glucose Simulator is added through the UI if the seeded setting did not take. A WebDriverAgent started from another harness checkout turns UI actions off: WDA always listens on port 8100, so its taps would land on that checkout's simulator. | `tkstress/app.py`, `lane.py` |
 | rounds | `--round-minutes` of chaos, then every fault undone, then the recovery check. A dead app is a finding and is relaunched. A live app slow to answer (an accessibility query, or without WebDriverAgent the quiesce's `simctl launch` of the running app) is sampled as a possible hang and, unless its main thread is waiting for events, relaunched. The app's resident memory and thread count are recorded per round (the summary shows first, last and peak). | `chaos.py`, `recovery.py` |
 | collection | Sanitizer and Main Thread Checker reports from every launch's stderr. `Trio*.ips` from `~/Library/Logs/DiagnosticReports`. TandemKit's and Trio's log files. faketandem's request log, appended per round to `faketandem-requests.jsonl`. | `detect.py`, `lane.py` |
@@ -93,7 +93,7 @@ Each run leaves `summary.md`, `result.json` and `findings.json` in `runs/<ts>-st
 | `main-thread` | Main Thread Checker on stderr (`--main-thread-checker`) | API + top 3 app frames |
 | `crash` | `Trio*.ips` written during the run (skipping SIGKILL/SIGTERM of a pid the harness ended) | exception + top 4 non-system frames of the crashed thread |
 | `app-died` | the app's pid gone without the harness ending it | (one per run; the crash report carries the detail) |
-| `no-recovery` | after a round's faults are undone, either no authenticated session within `--session-timeout`, or a `remainingInsulin` qualifying event (whose handler only reads `InsulinStatusRequest`) not answered within `--probe-timeout` | the stage that failed |
+| `no-recovery` | after a round's faults are undone, one of three steps fails (see below): no authenticated session within `--session-timeout` (stage `session`), the session up but no QUALIFYING_EVENTS subscription within it (`subscription`), or a `remainingInsulin` qualifying event (whose handler only reads `InsulinStatusRequest`) not answered within `--probe-timeout` (`probe`) | the stage that failed |
 | `hang` | a WebDriverAgent query to the live app slower than `--hang-seconds` (without WebDriverAgent, `simctl launch` of the running app timing out); `sample` of the process, unless its main thread is waiting in its run loop; then the app is relaunched, and the round files no `no-recovery` | deepest 3 app frames of the main thread; or, when a thread sat in ThreadSanitizer's race report for the whole sample, the access it was reporting (the runtime can deadlock symbolizing a report, which never prints) |
 | `build` | xcodebuild fails | first compiler error, paths and line numbers removed |
 
@@ -101,6 +101,25 @@ Fingerprints use function names only, so the same race on a later commit, or wit
 to the same issue. A finding whose signature rule changed also carries the fingerprint the old rule gave it
 (`aliases`), so its open issue keeps getting its sightings. Frames are classed as TandemKit / Trio / LoopKit / other from module and path, and the class is
 the finding's `component`.
+
+### The recovery check (`recovery.py`)
+
+After `Chaos.quiesce()` (faults cleared, radio on, clock and Control-IQ reset, delivery resumed):
+
+1. `session`: `GET /api/state` reports a connected, authenticated central.
+2. `subscription`: the same state reports `QUALIFYING_EVENTS` in `connection.subscribed`. TandemKit subscribes after it
+   authenticates, and faketandem drops a notification sent in between, so a probe before this step failed with
+   `409 ... no notifier registered` (issue 18). Steps 1 and 2 share `--session-timeout`. A faketandem that does not
+   report `subscribed` skips step 2.
+3. `probe`: a `remainingInsulin` event is posted and `InsulinStatusRequest` must follow within `--probe-timeout`. A
+   409 saying the central is not subscribed (or, from an older faketandem, `no notifier registered`) is retried every
+   half second for up to `--probe-timeout` before the probe is called failed. After a failed probe the check waits
+   up to 15 s for the session and probes once more.
+
+The result (and so the issue body's "recovery check") has `waited`: per step what it waited on and how long, plus
+`session_after_s` and `subscribed_after_s` in the session state and `send_retries` on the probe. A finding's
+fingerprint is the stage alone, so a residual probe failure files one issue however many rounds hit it; a central
+that never subscribes is its own `subscription` issue.
 
 ## Chaos
 
@@ -110,7 +129,7 @@ issue). The seed reproduces the plan, not the interleaving.
 | category | actions |
 |---|---|
 | pump | pump-UI or "remote" bolus (0.05–2 U), bolus abort, suspend (user/occlusion/alarm; resumed 20–150 s later), pump-side temp basal, bursts of read-only qualifying events, battery/reservoir changes, pump clock skew (±15 min), Control-IQ on/off |
-| link | `drop_response`, `delay_response` (to 8 s), `error_response` (not on InitiateBolus), disconnect after a request or mid-response, `drop_fragment`, radio off for 2–90 s, pump-side link drop, ATT MTU 23/185/247 |
+| link | `drop_response`, `delay_response` (to 8 s), `error_response`, disconnect after a request or mid-response, `drop_fragment`, radio off for 2–90 s, pump-side link drop, ATT MTU 23/185/247 |
 | app | SIGKILL then relaunch, `simctl terminate` then relaunch, background for 3–45 s |
 | ui | Settings ▸ Devices ▸ Insulin Pump (TandemKit's settings screen), tab hops |
 
@@ -180,16 +199,30 @@ a faketandem built from its default branch.
 
 - faketandem accepts `InitiateBolusRequest` while a bolus runs or delivery is suspended. A real pump refuses. The
   lane has no dose oracle yet, so this skews nothing it checks today.
-- An armed `error_response` is applied after the handler ran (TandemKit `docs/integration-harness.md`, D3), so
-  the chaos never arms it on InitiateBolus.
+- A request-scoped `error_response` is applied before the handler acts (faketandem's `matchRefusal`), so the
+  chaos arms it on InitiateBolus too: a refused bolus is not delivered.
 - `POST /api/state/tempbasal/start` drops `percent: 0` (`omitempty`), so a pump-side 0% temp basal cannot be
   staged.
-- Messages faketandem sends natively (history log stream, alarm status, qualifying events) bypass message-level
-  faults and the request log; only `drop_fragment` reaches them.
+- Messages faketandem encodes natively (history log stream, alarm status) match a message-level fault only when it
+  names them (`drop_response` on `HistoryLogStreamResponse`); the chaos does not arm those yet. Qualifying events
+  are in the request log as notifications, with a `send error` note when dropped. `drop_fragment` reaches all of them.
+- A notification is dropped, not queued, while the central is attached but not subscribed to its characteristic, as
+  it is right after every reconnect; `connection.subscribed` in `GET /api/state` says which it is.
 - `delay_response` sleeps on the connection's serial worker and delays everything queued behind it.
 - One attached central per emulator process: a second app instance would be refused as `busy`.
 - No Bluetooth power cycling on the phone side: TandemKit's virtual `CBCentralManager` is always `.poweredOn`.
   Radio faults are the pump's radio.
+
+## To do
+
+- **Nightlies cancelled before round 1.** 8 of 35 nightly runs were cancelled with no job output. The
+  six latest (29 to 34) show two patterns: about 3 hours from start to cancel (30, 32, 34, the last at the moment
+  run 35 began) and about 25 hours (29, 31, 33). Both nightly schedules and the manual workflow share the `stress-sim`
+  group, and GitHub keeps one waiting run per group: a newer waiting run cancels the older. Two 4-hour jobs a night fill the runner's night, so any extra wait (a stopped runner, a
+  manual run, a schedule delayed by GitHub) turns into a cancelled run. The runs' logs would say which; the change
+  to make once it is known is one of: move the Loop run out of the nightly (every other night, or a weekly), spread
+  the two schedules further apart than a job's wall, or a guard that skips the second schedule when the first has
+  not yet finished. Not done blind: each trades coverage for reliability.
 
 ## Not verified on a Mac yet
 
