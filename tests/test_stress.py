@@ -857,6 +857,139 @@ class Lane(unittest.TestCase):
         self.assertNotEqual(CONFIG.get("TH_SIM_NAME"), "TrioHarness")
 
 
+class ScriptedPump:
+    """The slice of the faketandem client the recovery check reads: snapshots from a script, then the last one."""
+
+    def __init__(self, snapshots, probe_errors=(), answers=True):
+        self.snapshots, self.probe_errors, self.answers = list(snapshots), list(probe_errors), answers
+        self.sent = 0
+        self.seq = 5
+
+    def snapshot(self):
+        return self.snapshots.pop(0) if len(self.snapshots) > 1 else self.snapshots[0]
+
+    def request_log(self, since=None):
+        if since is not None and self.sent and self.answers:
+            return {"entries": [{"seq": 6, "kind": "request", "message": "InsulinStatusRequest"}]}
+        return {"last_seq": self.seq, "entries": []}
+
+    def qualifying_event(self, bitmask):
+        if self.probe_errors:
+            raise HarnessError(self.probe_errors.pop(0))
+        self.sent += 1
+
+
+def snap(connected=True, authenticated=True, subscribed=None):
+    conn = {"connected": connected, "radio_enabled": True}
+    if subscribed is not None:
+        conn["subscribed"] = subscribed
+    return {"connection": conn, "auth": {"authenticated": authenticated}}
+
+
+class FakeTime:
+    def __init__(self):
+        self.now = 1000.0
+
+    def time(self):
+        return self.now
+
+    def sleep(self, s):
+        self.now += s
+
+
+NOT_SUBSCRIBED_409 = ("faketandem POST /api/state/qualifyingevent -> 409: failed to send qualifying event "
+                      "notification: central attached but not subscribed to QualifyingEvents")
+
+
+class RecoveryCheck(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        from tkstress import recovery
+        self.recovery = recovery
+        self.clock = FakeTime()
+        patcher = mock.patch.object(recovery, "time", self.clock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_session_wait_includes_the_qualifying_events_subscription(self):
+        pump = ScriptedPump([snap(subscribed=[]), snap(subscribed=["CURRENT_STATUS"]),
+                             snap(subscribed=["CURRENT_STATUS", "QUALIFYING_EVENTS"])])
+        ok, st = self.recovery.wait_for_session(pump, 30)
+        self.assertTrue(ok)
+        self.assertEqual(st["session_after_s"], 0.0)
+        self.assertEqual(st["subscribed_after_s"], 2.0)
+
+    def test_an_older_faketandem_without_subscriptions_waits_for_the_session_alone(self):
+        ok, st = self.recovery.wait_for_session(ScriptedPump([snap()]), 30)
+        self.assertTrue(ok)
+        self.assertNotIn("subscribed_after_s", st)
+
+    def test_a_central_that_never_subscribes_is_a_subscription_failure_not_a_session_one(self):
+        pump = ScriptedPump([snap(subscribed=["CURRENT_STATUS"])])
+        res = self.recovery.check(pump, session_timeout=10, probe_timeout=5)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["stage"], "subscription")
+        self.assertEqual(res["state"]["waiting_for"], "QUALIFYING_EVENTS subscription")
+        self.assertEqual(res["waited"][0]["waited_for"], "connected+authenticated+QUALIFYING_EVENTS")
+
+    def test_a_missing_session_stays_a_session_failure(self):
+        res = self.recovery.check(ScriptedPump([snap(connected=False, authenticated=False, subscribed=[])]),
+                                  session_timeout=5)
+        self.assertEqual((res["ok"], res["stage"]), (False, "session"))
+
+    def test_the_probe_retries_while_the_central_is_not_subscribed(self):
+        pump = ScriptedPump([snap(subscribed=["QUALIFYING_EVENTS"])], probe_errors=[NOT_SUBSCRIBED_409] * 3)
+        res = self.recovery.check(pump, session_timeout=10, probe_timeout=30)
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["send_retries"], 3)
+        self.assertEqual([w["step"] for w in res["waited"]], ["session", "probe"])
+
+    def test_an_older_faketandems_409_is_retried_too(self):
+        pump = ScriptedPump([snap()], probe_errors=["faketandem POST x -> 409: no notifier registered for QualifyingEvents"])
+        self.assertTrue(self.recovery.probe(pump, 30)[0])
+
+    def test_a_probe_that_stays_unsubscribed_fails_after_probe_timeout_with_the_error(self):
+        pump = ScriptedPump([snap(subscribed=["QUALIFYING_EVENTS"])], probe_errors=[NOT_SUBSCRIBED_409] * 1000)
+        ok, info = self.recovery.probe(pump, 10)
+        self.assertFalse(ok)
+        self.assertIn("not subscribed", info["error"])
+        self.assertGreater(info["send_attempts"], 5)
+
+    def test_other_send_errors_are_not_retried(self):
+        pump = ScriptedPump([snap()], probe_errors=["faketandem POST x -> 409: no central attached: x", "again"])
+        ok, info = self.recovery.probe(pump, 30)
+        self.assertFalse(ok)
+        self.assertEqual(info["send_attempts"], 1)
+
+    def test_a_residual_probe_failure_has_one_fingerprint_whatever_it_waited_on(self):
+        a = D.Finding(kind="no-recovery", title="t", signature=["probe"], component="TandemKit", round=3)
+        b = D.Finding(kind="no-recovery", title="t", signature=["probe"], component="TandemKit", round=9)
+        self.assertEqual(a.fp, b.fp)
+        self.assertNotEqual(a.fp, D.Finding(kind="no-recovery", title="t", signature=["subscription"],
+                                            component="TandemKit", round=3).fp)
+
+
+class SeedAndChaosSettings(unittest.TestCase):
+    def test_error_response_may_be_armed_on_initiate_bolus(self):
+        self.assertIn("InitiateBolusRequest", C.ERRORABLE_REQUESTS)
+
+    def test_install_and_seed_turns_the_basal_cycle_on_after_staging_the_pump(self):
+        from unittest import mock
+        from tkstress import lane as L, seed as S2
+        from tkstress.cli import build_parser
+        lane = L.Lane(build_parser().parse_args(["run"]))
+        lane.run, lane.fk = mock.Mock(), mock.Mock()
+        order = []
+        lane.fk.stage_paired_pump.side_effect = lambda *a: order.append("stage") or {"peripheral_id": "x"}
+        lane.fk.client.set_state.side_effect = lambda **k: order.append(("set_state", k))
+        with mock.patch("harness.sim.SimulatorDriver"), mock.patch.object(S2, "write_trio_settings"), \
+                mock.patch.object(S2, "write_pump_state"), mock.patch.object(S2, "tandem_pump_manager_raw"), \
+                mock.patch.object(L.Lane, "host", new_callable=mock.PropertyMock,
+                                  return_value=mock.Mock(flows=mock.Mock())):
+            lane.install_and_seed(Path("app"), "bundle")
+        self.assertEqual(order, ["stage", ("set_state", {"basal_cycle_enabled": True})])
+
+
 @unittest.skipUnless(os.environ.get("FAKETANDEM_BIN") and os.environ.get("FAKETANDEM_JAR"),
                      "set FAKETANDEM_BIN and FAKETANDEM_JAR to run against a real faketandem")
 class LiveFaketandem(unittest.TestCase):
@@ -876,6 +1009,11 @@ class LiveFaketandem(unittest.TestCase):
             ok, st = recovery.wait_for_session(pump.client, timeout=1, poll=0.2)
             self.assertFalse(ok)                       # nothing connected to it
             self.assertFalse(st["connected"])
+            self.assertEqual(st.get("subscribed"), [])
+            with self.assertRaisesRegex(HarnessError, "409.*no central attached"):
+                pump.client.qualifying_event(262144)
+            pump.client.set_state(basal_cycle_enabled=True)
+            self.assertTrue(pump.client.snapshot()["basal_cycle"]["enabled"])
 
 
 if __name__ == "__main__":
